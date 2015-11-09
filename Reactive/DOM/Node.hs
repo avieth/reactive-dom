@@ -43,11 +43,22 @@ type VirtualElementEvents = M.Map DOMString VirtualEvent
 -- | Contains a reactive-banana Event and a way to fire it.
 data VirtualEvent where
     VirtualEvent
-        :: forall event .
+        :: forall event t .
            ( IsEvent event )
-        => Event event
-        -> Handler event
+        => Event t
+        -> (Element -> event -> IO t)
+        -> Handler t
         -> VirtualEvent
+
+type VirtualElementReactimates = [VirtualReactimate]
+
+data VirtualReactimate where
+    VirtualReactimate
+        :: forall event .
+           ( )
+        => Event event
+        -> (Element -> event -> IO ())
+        -> VirtualReactimate
 
 -- | 
 data VirtualElement = VirtualElement {
@@ -57,6 +68,7 @@ data VirtualElement = VirtualElement {
     , virtualElementStyle :: Sequence Style
     , virtualElementChildren :: Sequence [VirtualNode]
     , virtualElementEvents :: IORef VirtualElementEvents
+    , virtualElementReactimates :: IORef VirtualElementReactimates
     }
 
 instance Eq VirtualElement where
@@ -95,8 +107,8 @@ renderText document str = do
 type VirtualNode = Either VirtualElement JSString
 type RenderedNode = Either RenderedVirtualElement RenderedText
 
-elem :: VirtualElement -> VirtualNode
-elem = Left
+node :: VirtualElement -> VirtualNode
+node = Left
 
 text :: JSString -> VirtualNode
 text = Right
@@ -122,8 +134,9 @@ virtualElement
     -> m VirtualElement
 virtualElement tagName attrs style kids = do
     unique <- liftIO $ newUnique
-    ref <- liftIO $ newIORef M.empty
-    return (VirtualElement unique tagName attrs style kids ref)
+    refEvent <- liftIO $ newIORef M.empty
+    refReactimate <- liftIO $ newIORef []
+    return (VirtualElement unique tagName attrs style kids refEvent refReactimate)
 
 element
     :: ( MonadIO m )
@@ -147,38 +160,63 @@ renderVirtualElement document velem = do
     reactimateChildren document el (virtualElementChildren velem)
     events <- liftIO $ readIORef (virtualElementEvents velem)
     wireVirtualEvents el events
+    reactimates <- liftIO $ readIORef (virtualElementReactimates velem)
+    wireVirtualReactimates el reactimates
     return (RenderedVirtualElement (virtualElementUnique velem) el)
 
 wireVirtualEvents
-    :: ()
+    :: ( )
     => Element
     -> VirtualElementEvents
     -> MomentIO ()
 wireVirtualEvents el vevents = M.foldWithKey (wireVirtualEvent el) (return ()) vevents
   where
     wireVirtualEvent :: Element -> DOMString -> VirtualEvent -> MomentIO () -> MomentIO ()
-    wireVirtualEvent el eventName (VirtualEvent ev fire) next = do
+    wireVirtualEvent el eventName (VirtualEvent ev io fire) next = do
         liftIO $ on el (EventName eventName) $ do
                      eventData <- ask
-                     liftIO (fire eventData)
+                     datum <- liftIO $ io el eventData
+                     liftIO (fire datum)
         next
 
 virtualEvent
     :: IsEvent event
     => VirtualElement
     -> EventName Element event
-    -> MomentIO (Event event)
-virtualEvent velem (EventName eventName) = do
+    -> (Element -> event -> IO t)
+    -> MomentIO (Event t)
+virtualEvent velem (EventName eventName) io = do
     events <- liftIO $ readIORef (virtualElementEvents velem)
     case M.lookup eventName events of
         -- This coercion should be safe. The only way this virtual event could
         -- land here is by some other use of this function @virtualEvent@.
-        Just (VirtualEvent ev _) -> return (unsafeCoerce ev)
+        Just (VirtualEvent ev _ _) -> return (unsafeCoerce ev)
         Nothing -> do (ev, fire) <- newEvent
                       let nextEvents :: VirtualElementEvents
-                          nextEvents = M.insert eventName (VirtualEvent ev fire) events
+                          nextEvents = M.insert eventName (VirtualEvent ev io fire) events
                       liftIO $ writeIORef (virtualElementEvents velem) nextEvents
                       return ev
+
+wireVirtualReactimates
+    :: ( )
+    => Element
+    -> VirtualElementReactimates
+    -> MomentIO ()
+wireVirtualReactimates el vreactimates = forM_ vreactimates (wireVirtualReactimate el)
+  where
+    wireVirtualReactimate :: Element -> VirtualReactimate -> MomentIO ()
+    wireVirtualReactimate el (VirtualReactimate ev action) = reactimate (action el <$> ev)
+
+virtualReactimate
+    :: ( )
+    => VirtualElement
+    -> Event event
+    -> (Element -> event -> IO ())
+    -> MomentIO ()
+virtualReactimate velem ev action = do
+    vreactimates <- liftIO $ readIORef (virtualElementReactimates velem)
+    let vreactimate = VirtualReactimate ev action
+    liftIO $ writeIORef (virtualElementReactimates velem) (vreactimate : vreactimates)
 
 -- We have the sequence of virtual elements... we can compare these under Eq,
 -- but that's not enough... we still must recover the actual DOM element

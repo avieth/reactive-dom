@@ -52,8 +52,8 @@ counter stateSequence = mdo
                          (M.empty |> never)
                          ([Left decrButton, Left display, Left incrButton] |> never)
 
-    incrs <- virtualEvent incrButton Element.click
-    decrs <- virtualEvent decrButton Element.click
+    incrs <- virtualEvent incrButton Element.click (\_ -> return)
+    decrs <- virtualEvent decrButton Element.click (\_ -> return)
 
     let initialDisplayText = toJSString (show (sequenceFirst stateSequence))
 
@@ -108,8 +108,8 @@ main = runWebGUI $ \webView -> do
                           (M.empty |> nextStyle)
                           ([Left button, Left textInput] |> nextChildren)
 
-            mouseleaves <- virtualEvent el Element.mouseLeave
-            clicks <- virtualEvent el Element.click
+            mouseleaves <- virtualEvent el Element.mouseLeave (\_ -> return)
+            clicks <- virtualEvent el Element.click (\_ -> return)
 
             let makeNextStyle :: MouseEvent -> M.Map JSString JSString
                 makeNextStyle _ = M.fromList [
