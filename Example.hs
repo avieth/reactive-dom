@@ -128,16 +128,21 @@ main = runWebGUI $ \webView -> do
             let nextAttributes = makeNextAttributes <$> mouseleaves
             let nextChildren = makeNextChildren <$> clicks
 
-            -- It's important to render only after all events are got.
-            rendered <- renderVirtualElement document el
-            body `appendChild` (Just (renderedVirtualElement rendered))
-
             reactimate ((\_ -> trace "Mouseleave" (return ())) <$> mouseleaves)
             reactimate ((\_ -> trace "Click" (return ())) <$> clicks)
 
-            counterVirtualElement <- counter (10 |> ((const 42) <$> clicks))
-            counterRendered <- renderVirtualElement document counterVirtualElement
-            body `appendChild` (Just (renderedVirtualElement counterRendered))
+            -- It's important to render only after all events are got.
+            el' <- centred (always (Left el))
+            --rendered <- renderVirtualElement document el'
+            --body `appendChild` (Just (renderedVirtualElement rendered))
+
+            counterVirtualElement <- (centred . always . Left) =<< (counter (10 |> ((const 42) <$> clicks)))
+            --counterRendered <- renderVirtualElement document counterVirtualElement
+            --body `appendChild` (Just (renderedVirtualElement counterRendered))
+
+            top <- horizontally (always [el', counterVirtualElement])
+            renderedTop <- renderVirtualElement document top
+            body `appendChild` (Just (renderedVirtualElement renderedTop))
 
             return ()
 
@@ -145,4 +150,3 @@ main = runWebGUI $ \webView -> do
     actuate network
 
     return ()
-

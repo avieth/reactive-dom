@@ -65,6 +65,9 @@ instance Eq VirtualElement where
 instance Ord VirtualElement where
     x `compare` y = virtualElementUnique x `compare` virtualElementUnique y
 
+mapStyle :: (Style -> Style) -> VirtualElement -> VirtualElement
+mapStyle f velem = velem { virtualElementStyle = fmap f (virtualElementStyle velem) }
+
 data RenderedVirtualElement = RenderedVirtualElement {
       renderedVirtualElementUnique :: Unique
     , renderedVirtualElement :: Element
@@ -309,3 +312,59 @@ reactimateAttributes element sequence = do
         toAdd = M.differenceWith justWhenDifferent new old
         toRemove = M.differenceWith justWhenDifferent old new
     justWhenDifferent x y = if x /= y then Just x else Nothing
+
+
+centred :: MonadIO m => Sequence VirtualNode -> m VirtualElement
+centred vnodes = element "div"
+                         (always M.empty)
+                         (always centredStyle)
+                         (pure <$> vnodes)
+  where
+    centredStyle :: Style
+    centredStyle = M.fromList [
+          ("display", "flex")
+        , ("justify-content", "center")
+        , ("align-items", "center")
+        ]
+
+horizontally :: MonadIO m => Sequence [VirtualElement] -> m VirtualElement
+horizontally velems = element "div"
+                              (always M.empty)
+                              (always flexStyle)
+                              (((fmap Left) . alignem) <$> velems)
+  where
+    flexStyle :: Style
+    flexStyle = M.fromList [
+          ("display", "flex")
+        , ("flex-direction", "row")
+        ]
+    alignem :: [VirtualElement] -> [VirtualElement]
+    alignem nodes = let share :: Double
+                        share = if length nodes == 0
+                                then 1
+                                else 1 / fromIntegral (length nodes)
+                        width = toJSString (show (share * 100) ++ "%")
+                        setWidth :: Style -> Style
+                        setWidth = M.alter (const (Just width)) "width"
+                    in  fmap (mapStyle setWidth) nodes
+
+vertically :: MonadIO m => Sequence [VirtualElement] -> m VirtualElement
+vertically velems = element "div"
+                            (always M.empty)
+                            (always flexStyle)
+                            (((fmap Left) . alignem) <$> velems)
+  where
+    flexStyle :: Style
+    flexStyle = M.fromList [
+          ("display", "flex")
+        , ("flex-direction", "column")
+        ]
+    alignem :: [VirtualElement] -> [VirtualElement]
+    alignem nodes = let share :: Double
+                        share = if length nodes == 0
+                                then 1
+                                else 1 / fromIntegral (length nodes)
+                        height = toJSString (show (share * 100) ++ "%")
+                        setHeight :: Style -> Style
+                        setHeight = M.alter (const (Just height)) "height"
+                    in  fmap (mapStyle setHeight) nodes
