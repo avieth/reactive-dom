@@ -302,28 +302,30 @@ reactimateStyle element sequence = do
             writeIORef currentStyle new
     reactimate (changeStyle <$> (sequenceRest sequence))
     return ()
+
+addStyle :: Element -> M.Map JSString JSString -> IO ()
+addStyle element style = do
+    let styleList :: [(JSString, Maybe JSString, JSString)]
+        styleList = M.foldWithKey (\x y -> (:) (x, Just y, "")) [] style
+    Just css <- getStyle element
+    forM_ styleList (\(x, y, z) -> setProperty css x y z)
+
+removeStyle :: Element -> M.Map JSString JSString -> IO ()
+removeStyle element style = do
+    let styleNames :: [JSString]
+        styleNames = M.keys style
+    Just css <- getStyle element
+    -- We bind here because we have to give a type signature in order to
+    -- disambiguate.
+    _ :: [Maybe JSString] <- forM styleNames (removeProperty css)
+    return ()
+
+-- | First component is the new style not present in old.
+--   Second is the rules in old not present in new (to be removed).
+diffStyle oldStyle newStyle = (toAdd, toRemove)
   where
-    addStyle :: Element -> M.Map JSString JSString -> IO ()
-    addStyle element style = do
-        let styleList :: [(JSString, Maybe JSString, JSString)]
-            styleList = M.foldWithKey (\x y -> (:) (x, Just y, "")) [] style
-        Just css <- getStyle element
-        forM_ styleList (\(x, y, z) -> setProperty css x y z)
-    removeStyle :: Element -> M.Map JSString JSString -> IO ()
-    removeStyle element style = do
-        let styleNames :: [JSString]
-            styleNames = M.keys style
-        Just css <- getStyle element
-        -- We bind here because we have to give a type signature in order to
-        -- disambiguate.
-        _ :: [Maybe JSString] <- forM styleNames (removeProperty css)
-        return ()
-    -- | First component is the new style not present in old.
-    --   Second is the rules in old not present in new (to be removed).
-    diffStyle oldStyle newStyle = (toAdd, toRemove)
-      where
-        toAdd = M.differenceWith justWhenDifferent newStyle oldStyle
-        toRemove = M.differenceWith justWhenDifferent oldStyle newStyle
+    toAdd = M.differenceWith justWhenDifferent newStyle oldStyle
+    toRemove = M.differenceWith justWhenDifferent oldStyle newStyle
     justWhenDifferent x y = if x /= y then Just x else Nothing
 
 type Attributes = M.Map JSString JSString
@@ -340,23 +342,24 @@ reactimateAttributes element sequence = do
             writeIORef currentAttributes new
     reactimate (changeAttributes <$> (sequenceRest sequence))
     return ()
-  where
-    addAttributes :: Element -> M.Map JSString JSString -> IO ()
-    addAttributes el attrs = do
-        let attrList :: [(JSString, JSString)]
-            attrList = M.foldWithKey (\x y -> (:) (x, y)) [] attrs
-        forM_ attrList (uncurry (setAttribute el))
-    removeAttributes :: Element -> M.Map JSString JSString -> IO ()
-    removeAttributes el attrs = do
-        let attrNames :: [JSString]
-            attrNames = M.keys attrs
-        forM_ attrNames (removeAttribute el)
-    diffAttributes old new = (toAdd, toRemove)
-      where
-        toAdd = M.differenceWith justWhenDifferent new old
-        toRemove = M.differenceWith justWhenDifferent old new
-    justWhenDifferent x y = if x /= y then Just x else Nothing
 
+addAttributes :: Element -> M.Map JSString JSString -> IO ()
+addAttributes el attrs = do
+    let attrList :: [(JSString, JSString)]
+        attrList = M.foldWithKey (\x y -> (:) (x, y)) [] attrs
+    forM_ attrList (uncurry (setAttribute el))
+
+removeAttributes :: Element -> M.Map JSString JSString -> IO ()
+removeAttributes el attrs = do
+    let attrNames :: [JSString]
+        attrNames = M.keys attrs
+    forM_ attrNames (removeAttribute el)
+
+diffAttributes old new = (toAdd, toRemove)
+  where
+    toAdd = M.differenceWith justWhenDifferent new old
+    toRemove = M.differenceWith justWhenDifferent old new
+    justWhenDifferent x y = if x /= y then Just x else Nothing
 
 centred :: MonadIO m => Sequence VirtualNode -> m VirtualElement
 centred vnodes = element "div"
@@ -369,6 +372,9 @@ centred vnodes = element "div"
           ("display", "flex")
         , ("justify-content", "center")
         , ("align-items", "center")
+        , ("position", "absolute")
+        , ("width", "100%")
+        , ("height", "100%")
         ]
 
 horizontally :: MonadIO m => Sequence [VirtualElement] -> m VirtualElement

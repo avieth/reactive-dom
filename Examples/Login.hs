@@ -31,15 +31,16 @@ data Login = Login {
     , loginSubmitEvent :: Event (Maybe JSString, Maybe JSString)
     }
 
+-- | Make a Login component by providing sequences of usernames and passwords.
 login
-    :: Sequence (Maybe JSString)
-    -> Sequence (Maybe JSString)
+    :: Sequence (Maybe JSString) -- ^ Usernames
+    -> Sequence (Maybe JSString) -- ^ Passwords
     -> MomentIO Login
 login usernameSequence passwordSequence = mdo
 
     usernameInput <- element "input"
                              (always (M.fromList [("placeholder", "Username")]))
-                             (always M.empty)
+                             (always inputStyle)
                              (always [])
 
     passwordInput <- element "input"
@@ -48,23 +49,23 @@ login usernameSequence passwordSequence = mdo
                                                  ]
                                      )
                              )
-                             (always M.empty)
+                             (always inputStyle)
                              (always [])
 
     button <- element "input"
                       (always (M.fromList [ ("type", "submit")
-                                          , ("value", "Log in")
+                                          , ("value", "☺")
                                           ]
                               )
                       )
-                      (always M.empty)
+                      (buttonStyle |> buttonStyleOnHover)
                       (always [])
 
     container <- vertically (always [usernameInput, passwordInput, button])
 
     form <- element "form"
                     (always M.empty)
-                    (always M.empty)
+                    (always formStyle)
                     (always [node container])
 
     -- Must preventDefault else the form submit causes the page to reload.
@@ -90,20 +91,83 @@ login usernameSequence passwordSequence = mdo
     virtualReactimate usernameInput usernameChanges setInputValue
     virtualReactimate passwordInput passwordChanges setInputValue
 
+    buttonMouseenter <- virtualEvent button Element.mouseEnter (\_ _ -> return ())
+    buttonMouseleave <- virtualEvent button Element.mouseLeave (\_ _ -> return ())
+    let buttonStyleOnHover = unionWith const
+                                       ((const buttonHoverStyle) <$> buttonMouseenter)
+                                       ((const buttonStyle) <$> buttonMouseleave)
+
     return $ Login form (usernameAndPasswordBehavior <@ submit)
+
+  where
+
+    inputStyle = M.fromList [
+          ("background-color", "rgba(255,255,255,0.4)")
+        , ("border", "none")
+        , ("margin", "0px 4px 4px 4px")
+        , ("text-align", "center")
+        ]
+
+    buttonStyle = M.fromList [
+          ("background-color", "rgba(0,0,0,0.25)")
+        , ("border", "none")
+        , ("color", "rgba(255,255,255,0.8)")
+        , ("margin", "0px 4px 4px 4px")
+        ]
+
+    buttonHoverStyle = M.fromList [
+          ("background-color", "rgba(0,0,0,0.25)")
+        , ("border", "none")
+        , ("color", "rgba(255,255,255,0.8)")
+        , ("margin", "0px 4px 4px 4px")
+        , ("box-shadow", "0px 0px 4px rgba(255,255,255,0.4) inset")
+        ]
+
+    formStyle = M.fromList [
+          ("background-color", "rgba(0,0,0,0.2)")
+        , ("border-radius", "4px")
+        , ("padding", "4px 0px 0px 0px")
+        ]
 
 main = runWebGUI $ \webView -> do
 
     Just document <- webViewGetDomDocument webView
     Just body <- getBody document
 
+    -- Set the body to occupy the entire viewport.
+    addStyle (toElement body)
+             (M.fromList [ ("position", "absolute")
+                         , ("width", "100%")
+                         , ("height", "100%")
+                         , ("margin", "0")
+                         ]
+             )
+
     let networkDescription :: MomentIO ()
         networkDescription = do
             login_ <- login (always Nothing) (always Nothing)
-            -- Here we render the same virtual element twice. Observe that
-            -- the two will remain tightly in-sync.
-            render document body . node . loginVirtualElement $ login_
-            render document body . node . loginVirtualElement $ login_
+            centredLoginElement <- centred (always (node (loginVirtualElement login_)))
+            background <- element "div"
+                                  (always M.empty)
+                                  (always (M.fromList [
+                                                ("background-image", "url(\"background.jpeg\")")
+                                              , ("background-position", "center")
+                                              , ("background-size", "cover")
+                                              , ("position", "absolute")
+                                              , ("left", "0px")
+                                              , ("top", "0px")
+                                              , ("width", "100%")
+                                              , ("height", "100%")
+                                              , ("filter", "blur(8px) sepia(60%)")
+                                              ]
+                                          )
+                                  )
+                                  (always [])
+            ui <- element "div"
+                          (always M.empty)
+                          (always M.empty)
+                          (always [node background, node centredLoginElement])
+            render document body (node ui)
             reactimate (print <$> loginSubmitEvent login_)
 
     network <- compile networkDescription
