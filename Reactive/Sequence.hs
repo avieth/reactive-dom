@@ -17,6 +17,7 @@ module Reactive.Sequence (
     , sequenceSingle
     , sequenceBehavior
     , bundle
+    , always
 
     ) where
 
@@ -48,3 +49,6 @@ bundle :: Sequence t -> MomentIO (Event (t, t))
 bundle sequence = do
     behavior <- stepper (sequenceFirst sequence) (sequenceRest sequence)
     return ((,) <$> behavior <@> sequenceRest sequence)
+
+always :: t -> Sequence t
+always x = x |> never
