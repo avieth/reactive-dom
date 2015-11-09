@@ -1,36 +1,20 @@
-{-|
-Module      : Examples.Counter
-Description : An example in which a reactive counter is defined.
-Copyright   : (c) Alexander Vieth, 2015
-Licence     : BSD3
-Maintainer  : aovieth@gmail.com
-Stability   : experimental
-Portability : non-portable (GHC only)
--}
+# reactive-dom
 
-{-# LANGUAGE AutoDeriveTypeable #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE RecursiveDo #-}
+Definitions in this project help the programmer to wire up a reactive DOM user
+interface via reactive-banana and ghcjs-dom.
 
-import qualified Data.Map as M
-import GHCJS.Types
-import GHCJS.DOM.Types (toJSString, MouseEvent)
-import GHCJS.DOM
-import GHCJS.DOM.Element as Element
-import GHCJS.DOM.Node as Node
-import GHCJS.DOM.Document as Document
-import Reactive.Banana.Combinators
-import Reactive.Banana.Frameworks
-import Reactive.Sequence
-import Reactive.DOM.Node
-import Debug.Trace
+This is experimental software, but it's also working software. Here's a preview
+of how it works (full example in [Counter.hs](Examples/Counter.hs)):
 
+```Haskell
 -- | Create an element which responds to the given sequence of Ints by
 --   displaying the latest one. This component also has internal increment and
 --   decrement buttons.
 counter :: Sequence Int -> MomentIO (VirtualElement)
 counter stateSequence = mdo
+
+    -- The function @element@ is used to create @VirtualElement@s: things which
+    -- can be instantiated to DOM elements, and from which we can derive events.
 
     -- A span to display the current Int.
     display <- element "span"
@@ -95,29 +79,4 @@ counter stateSequence = mdo
         nextDisplayText = (pure . Right . toJSString . show) <$> nextDisplayValue
 
     return container
-
-main = runWebGUI $ \webView -> do
-    Just document <- webViewGetDomDocument webView
-    Just body <- getBody document
-
-    let networkDescription :: MomentIO ()
-        networkDescription = mdo
-
-            -- Make the counter VirtualElement. We choose 10 as the initial
-            -- count, and throw in 42 whenever the mouse leaves the counter.
-            vcounter <- counter (10 |> (const 42 <$> mouseleaves))
-
-            mouseleaves <- virtualEvent vcounter Element.mouseLeave (\_ -> return)
-
-            -- Put the counter into a centred container.
-            vcentredCounter <- centred (always (node vcounter))
-
-            -- Render the centred counter.
-            render document body (node vcentredCounter)
-
-            return ()
-
-    network <- compile networkDescription
-    actuate network
-
-    return ()
+```
