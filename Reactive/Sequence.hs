@@ -8,6 +8,8 @@ Stability   : experimental
 Portability : non-portable (GHC only)
 -}
 
+{-# LANGUAGE RecursiveDo #-}
+
 module Reactive.Sequence (
 
       Sequence(..)
@@ -18,6 +20,7 @@ module Reactive.Sequence (
     , sequenceBehavior
     , bundle
     , always
+    , fromChanges
 
     ) where
 
@@ -52,3 +55,11 @@ bundle sequence = do
 
 always :: t -> Sequence t
 always x = x |> never
+
+-- | Give an initial value and an event producing changes, and get a sequence
+--   whose values are applications of those changes.
+fromDeltas :: t -> Event (t -> t) -> MomentIO (Sequence t)
+fromDeltas x xs = mdo
+    let event = (flip ($)) <$> behavior <@> xs
+    behavior <- stepper x event
+    return (Sequence (x, event))
