@@ -1,6 +1,6 @@
 {-|
-Module      : 
-Description : 
+Module      : Examples.Counter
+Description : An example in which a reactive counter is defined.
 Copyright   : (c) Alexander Vieth, 2015
 Licence     : BSD3
 Maintainer  : aovieth@gmail.com
@@ -106,7 +106,7 @@ main = runWebGUI $ \webView -> do
             el <- element "div"
                           (M.empty |> nextAttributes)
                           (M.empty |> nextStyle)
-                          ([Left button, Left textInput, Right "YO!"] |> nextChildren)
+                          ([Left button, Left textInput] |> nextChildren)
 
             mouseleaves <- virtualEvent el Element.mouseLeave
             clicks <- virtualEvent el Element.click
@@ -122,7 +122,7 @@ main = runWebGUI $ \webView -> do
 
 
             let makeNextChildren :: MouseEvent -> [VirtualNode]
-                makeNextChildren _ = [Right "wuddup?", Left button, Left button, Left button, Left textInput]
+                makeNextChildren _ = [Right "Hello world", Left button, Left button, Left button, Left textInput]
 
             let nextStyle = makeNextStyle <$> mouseleaves
             let nextAttributes = makeNextAttributes <$> mouseleaves
@@ -141,8 +141,10 @@ main = runWebGUI $ \webView -> do
             --body `appendChild` (Just (renderedVirtualElement counterRendered))
 
             top <- horizontally (always [el', counterVirtualElement])
-            renderedTop <- renderVirtualElement document top
-            body `appendChild` (Just (renderedVirtualElement renderedTop))
+            render document body (Left top)
+
+            --renderedTop <- renderVirtualElement document top
+            --body `appendChild` (Just (renderedVirtualElement renderedTop))
 
             return ()
 

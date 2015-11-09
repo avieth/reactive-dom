@@ -95,6 +95,12 @@ renderText document str = do
 type VirtualNode = Either VirtualElement JSString
 type RenderedNode = Either RenderedVirtualElement RenderedText
 
+elem :: VirtualElement -> VirtualNode
+elem = Left
+
+text :: JSString -> VirtualNode
+text = Right
+
 renderVirtualNode
     :: ( IsDocument document
        )
@@ -368,3 +374,16 @@ vertically velems = element "div"
                         setHeight :: Style -> Style
                         setHeight = M.alter (const (Just height)) "height"
                     in  fmap (mapStyle setHeight) nodes
+
+render
+    :: ( IsElement parent
+       , IsDocument document
+       )
+    => document
+    -> parent
+    -> VirtualNode
+    -> MomentIO ()
+render document parent vnode = do
+    rendered <- renderVirtualNode document vnode
+    parent `appendChild` (Just (renderedNode rendered))
+    return ()
