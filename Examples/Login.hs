@@ -61,12 +61,12 @@ login usernameSequence passwordSequence = mdo
                       (buttonStyle |> buttonStyleOnHover)
                       (always [])
 
-    container <- vertically (always [usernameInput, passwordInput, button])
+    container <- vertically (always [pure usernameInput, pure passwordInput, pure button])
 
     form <- element "form"
                     (always M.empty)
                     (always formStyle)
-                    (always [node container])
+                    (always [pure (node container)])
 
     -- Must preventDefault else the form submit causes the page to reload.
     submit <- virtualEvent form Element.submit (\_ -> preventDefault)
@@ -146,7 +146,7 @@ main = runWebGUI $ \webView -> do
     let networkDescription :: MomentIO ()
         networkDescription = do
             login_ <- login (always Nothing) (always Nothing)
-            centredLoginElement <- centred (always (node (loginVirtualElement login_)))
+            centredLoginElement <- centred (always (pure (node (loginVirtualElement login_))))
             background <- element "div"
                                   (always M.empty)
                                   (always (M.fromList [
@@ -166,7 +166,7 @@ main = runWebGUI $ \webView -> do
             ui <- element "div"
                           (always M.empty)
                           (always M.empty)
-                          (always [node background, node centredLoginElement])
+                          (always [pure (node background), pure (node centredLoginElement)])
             render document body (node ui)
             reactimate (print <$> loginSubmitEvent login_)
 

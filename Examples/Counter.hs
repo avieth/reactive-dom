@@ -36,7 +36,7 @@ counter stateSequence = mdo
     display <- element "span"
                        (always M.empty) -- No attributes, ever
                        (always M.empty) -- No style, ever.
-                       ([Right initialDisplayText] |> nextDisplayText)
+                       ([pure (text initialDisplayText)] |> nextDisplayText)
 
     -- A button to increment.
     incrButton <- element "input"
@@ -54,7 +54,11 @@ counter stateSequence = mdo
     container <- element "div"
                          (always M.empty)
                          (always M.empty)
-                         (always [node decrButton, node display, node incrButton])
+                         (always [ pure (node decrButton)
+                                 , pure (node display)
+                                 , pure (node incrButton)
+                                 ]
+                         )
 
     -- Grab some reactive-banana events from the *virtual* elements. The last
     -- parameter is of type
@@ -91,8 +95,8 @@ counter stateSequence = mdo
     let nextDisplayValue :: Event Int
         nextDisplayValue = unionWith const (sequenceRest stateSequence) computedState
 
-    let nextDisplayText :: Event [VirtualNode]
-        nextDisplayText = (pure . Right . toJSString . show) <$> nextDisplayValue
+    let nextDisplayText :: Event [MomentIO VirtualNode]
+        nextDisplayText = (pure . pure . text . toJSString . show) <$> nextDisplayValue
 
     return container
 
@@ -110,7 +114,7 @@ main = runWebGUI $ \webView -> do
             mouseleaves <- virtualEvent vcounter Element.mouseLeave (\_ -> return)
 
             -- Put the counter into a centred container.
-            vcentredCounter <- centred (always (node vcounter))
+            vcentredCounter <- centred (always (pure (node vcounter)))
 
             -- Render the centred counter.
             render document body (node vcentredCounter)

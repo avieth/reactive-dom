@@ -66,7 +66,7 @@ data VirtualElement = VirtualElement {
     , virtualElementTag :: JSString
     , virtualElementAttributes :: Sequence Attributes
     , virtualElementStyle :: Sequence Style
-    , virtualElementChildren :: Sequence [VirtualNode]
+    , virtualElementChildren :: Sequence [MomentIO VirtualNode]
     , virtualElementEvents :: IORef VirtualElementEvents
     , virtualElementReactimates :: IORef VirtualElementReactimates
     }
@@ -130,7 +130,7 @@ virtualElement
     => JSString
     -> Sequence Attributes
     -> Sequence Style
-    -> Sequence [VirtualNode]
+    -> Sequence [MomentIO VirtualNode]
     -> m VirtualElement
 virtualElement tagName attrs style kids = do
     unique <- liftIO $ newUnique
@@ -143,7 +143,7 @@ element
     => JSString
     -> Sequence Attributes
     -> Sequence Style
-    -> Sequence [VirtualNode]
+    -> Sequence [MomentIO VirtualNode]
     -> m VirtualElement
 element = virtualElement
 
@@ -228,12 +228,12 @@ reactimateChildren
        )
     => document
     -> parent
-    -> Sequence [VirtualNode]
+    -> Sequence [MomentIO VirtualNode]
     -> MomentIO ()
 reactimateChildren document parent sequence = mdo
 
     -- Use the first element of the sequence to render all children.
-    firsts <- forM (sequenceFirst sequence) (renderVirtualNode document)
+    firsts <- forM (sequenceFirst sequence) ((=<<) (renderVirtualNode document))
     forM_ firsts (appendChild parent . Just . renderedNode)
 
     -- We need to have the list of currently rendered elements, so that we can
@@ -278,12 +278,12 @@ reactimateChildren document parent sequence = mdo
     update
         :: parent
         -> IORef [RenderedNode]
-        -> [VirtualNode]
+        -> [MomentIO VirtualNode]
         -> MomentIO ()
     update parent current new = do
         currentRendered <- liftIO $ readIORef current
         forM_ currentRendered (removeChild parent . Just . renderedNode)
-        newRendered <- forM new (renderVirtualNode document)
+        newRendered <- forM new ((=<<) (renderVirtualNode document))
         forM_ newRendered (appendChild parent . Just . renderedNode)
         liftIO $ writeIORef current newRendered
         return ()
@@ -361,7 +361,7 @@ diffAttributes old new = (toAdd, toRemove)
     toRemove = M.differenceWith justWhenDifferent old new
     justWhenDifferent x y = if x /= y then Just x else Nothing
 
-centred :: MonadIO m => Sequence VirtualNode -> m VirtualElement
+centred :: MonadIO m => Sequence (MomentIO VirtualNode) -> m VirtualElement
 centred vnodes = element "div"
                          (always M.empty)
                          (always centredStyle)
@@ -377,18 +377,18 @@ centred vnodes = element "div"
         , ("height", "100%")
         ]
 
-horizontally :: MonadIO m => Sequence [VirtualElement] -> m VirtualElement
+horizontally :: MonadIO m => Sequence [MomentIO VirtualElement] -> m VirtualElement
 horizontally velems = element "div"
                               (always M.empty)
                               (always flexStyle)
-                              (((fmap Left) . alignem) <$> velems)
+                              ((((fmap . fmap) Left) . alignem) <$> velems)
   where
     flexStyle :: Style
     flexStyle = M.fromList [
           ("display", "flex")
         , ("flex-direction", "row")
         ]
-    alignem :: [VirtualElement] -> [VirtualElement]
+    alignem :: [MomentIO VirtualElement] -> [MomentIO VirtualElement]
     alignem nodes = let share :: Double
                         share = if length nodes == 0
                                 then 1
@@ -396,20 +396,20 @@ horizontally velems = element "div"
                         width = toJSString (show (share * 100) ++ "%")
                         setWidth :: Style -> Style
                         setWidth = M.alter (const (Just width)) "width"
-                    in  fmap (mapStyle setWidth) nodes
+                    in  (fmap . fmap) (mapStyle setWidth) nodes
 
-vertically :: MonadIO m => Sequence [VirtualElement] -> m VirtualElement
+vertically :: MonadIO m => Sequence [MomentIO VirtualElement] -> m VirtualElement
 vertically velems = element "div"
                             (always M.empty)
                             (always flexStyle)
-                            (((fmap Left) . alignem) <$> velems)
+                            ((((fmap . fmap) Left) . alignem) <$> velems)
   where
     flexStyle :: Style
     flexStyle = M.fromList [
           ("display", "flex")
         , ("flex-direction", "column")
         ]
-    alignem :: [VirtualElement] -> [VirtualElement]
+    alignem :: [MomentIO VirtualElement] -> [MomentIO VirtualElement]
     alignem nodes = let share :: Double
                         share = if length nodes == 0
                                 then 1
@@ -417,7 +417,7 @@ vertically velems = element "div"
                         height = toJSString (show (share * 100) ++ "%")
                         setHeight :: Style -> Style
                         setHeight = M.alter (const (Just height)) "height"
-                    in  fmap (mapStyle setHeight) nodes
+                    in  (fmap . fmap) (mapStyle setHeight) nodes
 
 render
     :: ( IsElement parent
