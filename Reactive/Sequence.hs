@@ -22,6 +22,12 @@ module Reactive.Sequence (
     , always
     , fromChanges
 
+    , LiveSequence
+    , liveSequence
+    , sequenceCurrent
+    , sequenceCurrentLater
+    , sequenceNext
+
     ) where
 
 import Reactive.Banana.Combinators
@@ -63,3 +69,22 @@ fromDeltas x xs = mdo
     let event = (flip ($)) <$> behavior <@> xs
     behavior <- stepper x event
     return (Sequence (x, event))
+
+newtype LiveSequence t = LiveSequence (Behavior t, Event t)
+
+instance Functor LiveSequence where
+    fmap f (LiveSequence (b, e)) = LiveSequence (fmap f b, fmap f e)
+
+liveSequence :: Sequence t -> MomentIO (LiveSequence t)
+liveSequence (Sequence (t, ev)) = do
+    b <- stepper t ev
+    return (LiveSequence (b, ev))
+
+sequenceCurrent :: LiveSequence t -> MomentIO t
+sequenceCurrent (LiveSequence (b, _)) = valueB b
+
+sequenceCurrentLater :: LiveSequence t -> MomentIO t
+sequenceCurrentLater (LiveSequence (b, _)) = valueBLater b
+
+sequenceNext :: LiveSequence t -> Event t
+sequenceNext (LiveSequence (_, e)) = e

@@ -64,9 +64,9 @@ data VirtualReactimate where
 data VirtualElement = VirtualElement {
       virtualElementUnique :: Unique
     , virtualElementTag :: JSString
-    , virtualElementAttributes :: Sequence Attributes
-    , virtualElementStyle :: Sequence Style
-    , virtualElementChildren :: Sequence [MomentIO VirtualNode]
+    , virtualElementAttributes :: LiveSequence Attributes
+    , virtualElementStyle :: LiveSequence Style
+    , virtualElementChildren :: LiveSequence [MomentIO VirtualNode]
     , virtualElementEvents :: IORef VirtualElementEvents
     , virtualElementReactimates :: IORef VirtualElementReactimates
     }
@@ -126,25 +126,26 @@ renderedNode :: RenderedNode -> Node
 renderedNode = either (toNode . renderedVirtualElement) (toNode . renderedTextNode)
 
 virtualElement
-    :: ( MonadIO m )
-    => JSString
+    :: JSString
     -> Sequence Attributes
     -> Sequence Style
     -> Sequence [MomentIO VirtualNode]
-    -> m VirtualElement
+    -> MomentIO VirtualElement
 virtualElement tagName attrs style kids = do
+    lattrs <- liveSequence attrs
+    lstyle <- liveSequence style
+    lkids <- liveSequence kids
     unique <- liftIO $ newUnique
     refEvent <- liftIO $ newIORef M.empty
     refReactimate <- liftIO $ newIORef []
-    return (VirtualElement unique tagName attrs style kids refEvent refReactimate)
+    return (VirtualElement unique tagName lattrs lstyle lkids refEvent refReactimate)
 
 element
-    :: ( MonadIO m )
-    => JSString
+    :: JSString
     -> Sequence Attributes
     -> Sequence Style
     -> Sequence [MomentIO VirtualNode]
-    -> m VirtualElement
+    -> MomentIO VirtualElement
 element = virtualElement
 
 renderVirtualElement
@@ -228,12 +229,13 @@ reactimateChildren
        )
     => document
     -> parent
-    -> Sequence [MomentIO VirtualNode]
+    -> LiveSequence [MomentIO VirtualNode]
     -> MomentIO ()
 reactimateChildren document parent sequence = mdo
 
     -- Use the first element of the sequence to render all children.
-    firsts <- forM (sequenceFirst sequence) ((=<<) (renderVirtualNode document))
+    cur <- sequenceCurrent sequence
+    firsts <- forM cur ((=<<) (renderVirtualNode document))
     forM_ firsts (appendChild parent . Just . renderedNode)
 
     -- We need to have the list of currently rendered elements, so that we can
@@ -258,7 +260,7 @@ reactimateChildren document parent sequence = mdo
 
     currentlyRendered <- liftIO $ newIORef firsts
 
-    execute (update parent currentlyRendered <$> sequenceRest sequence)
+    execute (update parent currentlyRendered <$> sequenceNext sequence)
 
     return ()
 
@@ -290,17 +292,18 @@ reactimateChildren document parent sequence = mdo
 
 type Style = M.Map JSString JSString
 
-reactimateStyle :: Element -> Sequence Style -> MomentIO ()
+reactimateStyle :: Element -> LiveSequence Style -> MomentIO ()
 reactimateStyle element sequence = do
-    liftIO $ addStyle element (sequenceFirst sequence)
-    currentStyle <- liftIO $ newIORef (sequenceFirst sequence)
+    cur <- sequenceCurrent sequence
+    liftIO $ addStyle element cur
+    currentStyle <- liftIO $ newIORef cur
     let changeStyle new = do
             current <- readIORef currentStyle
             let (add, remove) = diffStyle current new
             removeStyle element remove
             addStyle element add
             writeIORef currentStyle new
-    reactimate (changeStyle <$> (sequenceRest sequence))
+    reactimate (changeStyle <$> (sequenceNext sequence))
     return ()
 
 addStyle :: Element -> M.Map JSString JSString -> IO ()
@@ -330,17 +333,18 @@ diffStyle oldStyle newStyle = (toAdd, toRemove)
 
 type Attributes = M.Map JSString JSString
 
-reactimateAttributes :: Element -> Sequence Attributes -> MomentIO ()
+reactimateAttributes :: Element -> LiveSequence Attributes -> MomentIO ()
 reactimateAttributes element sequence = do
-    liftIO $ addAttributes element (sequenceFirst sequence)
-    currentAttributes <- liftIO $ newIORef (sequenceFirst sequence)
+    cur <- sequenceCurrent sequence
+    liftIO $ addAttributes element cur
+    currentAttributes <- liftIO $ newIORef cur
     let changeAttributes new = do
             current <- readIORef currentAttributes
             let (add, remove) = diffAttributes current new
             removeAttributes element remove
             addAttributes element add
             writeIORef currentAttributes new
-    reactimate (changeAttributes <$> (sequenceRest sequence))
+    reactimate (changeAttributes <$> (sequenceNext sequence))
     return ()
 
 addAttributes :: Element -> M.Map JSString JSString -> IO ()
@@ -361,7 +365,7 @@ diffAttributes old new = (toAdd, toRemove)
     toRemove = M.differenceWith justWhenDifferent old new
     justWhenDifferent x y = if x /= y then Just x else Nothing
 
-centred :: MonadIO m => Sequence (MomentIO VirtualNode) -> m VirtualElement
+centred :: Sequence (MomentIO VirtualNode) -> MomentIO VirtualElement
 centred vnodes = element "div"
                          (always M.empty)
                          (always centredStyle)
@@ -377,7 +381,7 @@ centred vnodes = element "div"
         , ("height", "100%")
         ]
 
-horizontally :: MonadIO m => Sequence [MomentIO VirtualElement] -> m VirtualElement
+horizontally :: Sequence [MomentIO VirtualElement] -> MomentIO VirtualElement
 horizontally velems = element "div"
                               (always M.empty)
                               (always flexStyle)
@@ -398,7 +402,7 @@ horizontally velems = element "div"
                         setWidth = M.alter (const (Just width)) "width"
                     in  (fmap . fmap) (mapStyle setWidth) nodes
 
-vertically :: MonadIO m => Sequence [MomentIO VirtualElement] -> m VirtualElement
+vertically :: Sequence [MomentIO VirtualElement] -> MomentIO VirtualElement
 vertically velems = element "div"
                             (always M.empty)
                             (always flexStyle)

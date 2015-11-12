@@ -167,7 +167,7 @@ main = runWebGUI $ \webView -> do
                           (always M.empty)
                           (always M.empty)
                           (always [pure (node background), pure (node centredLoginElement)])
-            render document body (node ui)
+            render document body ui
             reactimate (print <$> loginSubmitEvent login_)
 
     network <- compile networkDescription
