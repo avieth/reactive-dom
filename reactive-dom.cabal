@@ -18,6 +18,8 @@ cabal-version:       >=1.10
 library
   exposed-modules:     Reactive.Sequence
                      , Reactive.DOM.Node
+                     , Reactive.DOM.XHR
+
   -- other-modules:       
   other-extensions:    AutoDeriveTypeable
                      , OverloadedStrings

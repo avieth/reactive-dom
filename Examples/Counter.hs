@@ -24,6 +24,7 @@ import Reactive.Banana.Combinators
 import Reactive.Banana.Frameworks
 import Reactive.Sequence
 import Reactive.DOM.Node
+import Reactive.DOM.Monad
 import Debug.Trace
 
 -- | Create an element which responds to the given sequence of Ints by
@@ -117,7 +118,7 @@ main = runWebGUI $ \webView -> do
             vcentredCounter <- centred (always (pure (node vcounter)))
 
             -- Render the centred counter.
-            render document body (node vcentredCounter)
+            render document body vcentredCounter
 
             return ()
 

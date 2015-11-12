@@ -419,15 +419,42 @@ vertically velems = element "div"
                         setHeight = M.alter (const (Just height)) "height"
                     in  (fmap . fmap) (mapStyle setHeight) nodes
 
+maybeRender
+    :: ( IsElement parent
+       , IsDocument document
+       )
+    => document
+    -> parent
+    -> Maybe RenderedVirtualElement
+    -> VirtualElement
+    -> MomentIO RenderedVirtualElement
+maybeRender document parent maybeRendered velem = case maybeRendered of
+    Nothing -> render document parent velem
+    Just vrendered -> if renderedFrom vrendered velem
+                      then return vrendered
+                      else do unrender parent vrendered
+                              render document parent velem
+
 render
     :: ( IsElement parent
        , IsDocument document
        )
     => document
     -> parent
-    -> VirtualNode
-    -> MomentIO ()
+    -> VirtualElement
+    -> MomentIO RenderedVirtualElement
 render document parent vnode = do
-    rendered <- renderVirtualNode document vnode
-    parent `appendChild` (Just (renderedNode rendered))
+    vrendered <- renderVirtualElement document vnode
+    parent `appendChild` (Just (renderedVirtualElement vrendered))
+    return vrendered
+
+unrender
+    :: ( IsElement parent
+       )
+    => parent
+    -> RenderedVirtualElement
+    -> MomentIO ()
+unrender parent vrendered = do
+    parent `removeChild` (Just (renderedVirtualElement vrendered))
     return ()
+
