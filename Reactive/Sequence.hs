@@ -76,7 +76,7 @@ instance Functor LiveSequence where
     fmap f (LiveSequence (b, e)) = LiveSequence (fmap f b, fmap f e)
 
 liveSequence :: Sequence t -> MomentIO (LiveSequence t)
-liveSequence (Sequence (t, ev)) = do
+liveSequence ~(Sequence (t, ev)) = do
     b <- stepper t ev
     return (LiveSequence (b, ev))
 
