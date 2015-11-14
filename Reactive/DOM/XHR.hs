@@ -10,11 +10,21 @@ Portability : non-portable (GHC only)
 
 {-# LANGUAGE AutoDeriveTypeable #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Reactive.DOM.XHR where
 
 import Control.Monad (forM_)
 import Control.Monad.Trans.Reader (ask)
+import Control.Monad.IO.Class
+import Data.IORef
+import Data.Unique
+import Data.Monoid
+import Data.Bifunctor
+import Data.Bifoldable
+import Data.Bitraversable
+import Data.EitherBoth
+import qualified Data.Map as M
 import GHCJS.Types
 import GHCJS.DOM.Types
 import GHCJS.DOM.Element as Element
@@ -23,6 +33,8 @@ import GHCJS.DOM.JSFFI.XMLHttpRequest as XHR
 import GHCJS.DOM.EventM
 import Reactive.Banana.Combinators as Banana
 import Reactive.Banana.Frameworks
+import Reactive.Sequence
+import Reactive.EventTransformer
 
 type XHRURL = JSString
 
@@ -53,13 +65,91 @@ data XHRResponse = XHRResponse {
     , xhrResponseBody :: Maybe JSString
     }
 
--- It's weird that we have an event around the abort.
--- Hm, makes sense though. Each occurrence of the event corresponds to one
--- send of the XHR.
-xhr :: Banana.Event XHRRequest -> MomentIO (Banana.Event (Banana.Event XHRResponse, IO ()))
-xhr inputEvent = execute (makeXHRFromRequest <$> inputEvent)
+type XHRAbort = Unique
+type XHRPending = Unique
 
-makeXHRFromRequest :: XHRRequest -> MomentIO (Banana.Event XHRResponse, IO ())
+xhrResponses :: Banana.Event (EitherBoth XHRPending t) -> Banana.Event t 
+xhrResponses = filterJust . fmap (bifoldl (const) (const Just) Nothing)
+
+-- | Request comes in, you get a pending event, which can be used to abort 
+--   the request.
+xhr :: EventTransformer (EitherBoth XHRAbort XHRRequest) (EitherBoth XHRPending XHRResponse)
+xhr = EventTransformer $ \ev -> do
+
+          xhrs :: IORef (M.Map Unique XMLHttpRequest) <- liftIO $ newIORef M.empty
+
+          -- When an event comes in, we get either
+          --     () in case it was an abort.
+          --     immediately a Unique indifying the new request, and an event
+          --         with this request's response.
+          --     or both in case it was both.
+          let req :: EitherBoth XHRAbort XHRRequest -> MomentIO (EitherBoth () (Unique, Banana.Event XHRResponse))
+              req = bitraverse (cancelXHR xhrs) (spawnXHR xhrs)
+          out :: Banana.Event (EitherBoth () (Unique, Banana.Event XHRResponse))
+              <- execute (req <$> ev)
+
+          -- Now we use the event @out@ to produce something of type
+          -- 
+          --     Event (EitherBoth XHRPending XHRResponse)
+          --
+          -- This is obtained by discarding the ()'s to get
+          --
+          --     Event (Unique, Banana.Event XHRResponse)
+          --
+          -- splitting this into two distinct events, switching the second,
+          -- and then unioning into an EitherBoth.
+          let pickSecond :: EitherBoth s t -> Maybe t
+              pickSecond e = case e of
+                  OneLeft _ -> Nothing
+                  OneRight x -> Just x
+                  Both _ x -> Just x
+
+          let filtered :: Banana.Event (Unique, Banana.Event XHRResponse)
+              filtered = filterJust (pickSecond <$> out)
+
+          let responses :: Banana.Event XHRResponse
+              responses = switchE (snd <$> filtered)
+
+          let pendings :: Banana.Event Unique
+              pendings = fst <$> filtered
+
+          let unioner
+                  :: EitherBoth a b
+                  -> EitherBoth a b
+                  -> EitherBoth a b
+              unioner l r = case (l, r) of
+                  (OneLeft l', OneRight r') -> Both l' r'
+                  -- Impossible. Notice the use of unioner: left argument is
+                  -- always OneLeft, second is always OneRight.
+                  -- Wish I didn't have to give a partial function, but since
+                  -- unionWith is very strict in its type parameters, I'm out
+                  -- of options.
+                  _ -> undefined
+
+          let boths :: Banana.Event (EitherBoth Unique XHRResponse)
+              boths = unionWith unioner (OneLeft <$> pendings) (OneRight <$> responses)
+
+          return boths
+
+cancelXHR :: IORef (M.Map Unique XMLHttpRequest) -> XHRAbort -> MomentIO ()
+cancelXHR ref unique = do
+    m <- liftIO $ readIORef ref
+    case M.lookup unique m of
+        Nothing -> return ()
+        Just xhr -> do XHR.abort xhr
+                       liftIO $ writeIORef ref (M.delete unique m)
+
+spawnXHR
+    :: IORef (M.Map Unique XMLHttpRequest)
+    -> XHRRequest
+    -> MomentIO (Unique, Banana.Event XHRResponse)
+spawnXHR ref req = do
+    u <- liftIO newUnique
+    (ev, xhr) <- makeXHRFromRequest req
+    liftIO $ modifyIORef ref (M.insert u xhr)
+    return (u, ev)
+
+makeXHRFromRequest :: XHRRequest -> MomentIO (Banana.Event XHRResponse, XMLHttpRequest)
 makeXHRFromRequest xhrRequest = do
     xhrObject <- newXMLHttpRequest
     open xhrObject (show (xhrRequestMethod xhrRequest))
@@ -79,4 +169,4 @@ makeXHRFromRequest xhrRequest = do
     case xhrRequestBody xhrRequest of
         Nothing -> send xhrObject
         Just str -> sendString xhrObject str
-    return (ev, XHR.abort xhrObject)
+    return (ev, xhrObject)

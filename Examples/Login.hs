@@ -26,47 +26,50 @@ import Reactive.Sequence
 import Reactive.DOM.Node
 import Debug.Trace
 
-data Login = Login {
-      loginVirtualElement :: VirtualElement
+data Login m = Login {
+      loginVirtualElement :: VirtualElement m
     , loginSubmitEvent :: Event (Maybe JSString, Maybe JSString)
     }
 
 -- | Make a Login component by providing sequences of usernames and passwords.
 login
-    :: Sequence (Maybe JSString) -- ^ Usernames
+    :: Applicative m
+    => Sequence (Maybe JSString) -- ^ Usernames
     -> Sequence (Maybe JSString) -- ^ Passwords
-    -> MomentIO Login
+    -> MomentIO (Login m)
 login usernameSequence passwordSequence = mdo
 
-    usernameInput <- element "input"
-                             (always (M.fromList [("placeholder", "Username")]))
-                             (always inputStyle)
-                             (always [])
+    usernameInput <- element (pure "input")
+                             (always (pure (M.fromList [("placeholder", "Username")])))
+                             (always (pure inputStyle))
+                             (always (pure []))
 
-    passwordInput <- element "input"
-                             (always (M.fromList [ ("placeholder", "Password")
-                                                 , ("type", "password")
-                                                 ]
+    passwordInput <- element (pure "input")
+                             (always (pure (M.fromList [ ("placeholder", "Password")
+                                                       , ("type", "password")
+                                                       ]
+                                           )
                                      )
                              )
-                             (always inputStyle)
-                             (always [])
+                             (always (pure inputStyle))
+                             (always (pure []))
 
-    button <- element "input"
-                      (always (M.fromList [ ("type", "submit")
-                                          , ("value", "☺")
-                                          ]
+    button <- element (pure "input")
+                      (always (pure (M.fromList [ ("type", "submit")
+                                                , ("value", "☺")
+                                                ]
+                                    )
                               )
                       )
-                      (buttonStyle |> buttonStyleOnHover)
-                      (always [])
+                      ((pure buttonStyle) |> (fmap pure buttonStyleOnHover))
+                      (always (pure []))
 
-    container <- vertically (always [pure usernameInput, pure passwordInput, pure button])
+    container <- vertically (always (pure [pure usernameInput, pure passwordInput, pure button]))
 
-    form <- element "form"
-                    (always M.empty)
-                    (always formStyle)
-                    (always [pure (node container)])
+    form <- element (pure "form")
+                    (always (pure M.empty))
+                    (always (pure formStyle))
+                    (always (pure [pure (node container)]))
 
     -- Must preventDefault else the form submit causes the page to reload.
     submit <- virtualEvent form Element.submit (\_ -> preventDefault)
@@ -146,27 +149,29 @@ main = runWebGUI $ \webView -> do
     let networkDescription :: MomentIO ()
         networkDescription = do
             login_ <- login (always Nothing) (always Nothing)
-            centredLoginElement <- centred (always (pure (node (loginVirtualElement login_))))
-            background <- element "div"
-                                  (always M.empty)
-                                  (always (M.fromList [
-                                                ("background-image", "url(\"background.jpeg\")")
-                                              , ("background-position", "center")
-                                              , ("background-size", "cover")
-                                              , ("position", "absolute")
-                                              , ("left", "0px")
-                                              , ("top", "0px")
-                                              , ("width", "100%")
-                                              , ("height", "100%")
-                                              , ("filter", "blur(8px) sepia(60%)")
-                                              ]
+            centredLoginElement <- centred (always (pure (pure (node (loginVirtualElement login_)))))
+            background <- element (pure "div")
+                                  (always (pure M.empty))
+                                  (always (pure (M.fromList [
+                                                      ("background-image", "url(\"background.jpeg\")")
+                                                    , ("background-position", "center")
+                                                    , ("background-size", "cover")
+                                                    , ("position", "absolute")
+                                                    , ("left", "0px")
+                                                    , ("top", "0px")
+                                                    , ("width", "100%")
+                                                    , ("height", "100%")
+                                                    , ("filter", "blur(8px) sepia(60%)")
+                                                    ]
+                                                )
                                           )
                                   )
-                                  (always [])
-            ui <- element "div"
-                          (always M.empty)
-                          (always M.empty)
-                          (always [pure (node background), pure (node centredLoginElement)])
+                                  (always (pure []))
+            ui <- element (pure "div")
+                          (always (pure M.empty))
+                          (always (pure M.empty))
+                          (always (pure [pure (node background), pure (node centredLoginElement)]))
+
             render document body ui
             reactimate (print <$> loginSubmitEvent login_)
 

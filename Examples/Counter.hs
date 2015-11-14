@@ -24,41 +24,42 @@ import Reactive.Banana.Combinators
 import Reactive.Banana.Frameworks
 import Reactive.Sequence
 import Reactive.DOM.Node
-import Reactive.DOM.Monad
+--import Reactive.DOM.Monad
 import Debug.Trace
 
 -- | Create an element which responds to the given sequence of Ints by
 --   displaying the latest one. This component also has internal increment and
 --   decrement buttons.
-counter :: Sequence Int -> MomentIO (VirtualElement)
+counter :: Applicative m => Sequence Int -> MomentIO (VirtualElement m)
 counter stateSequence = mdo
 
     -- A span to display the current Int.
-    display <- element "span"
-                       (always M.empty) -- No attributes, ever
-                       (always M.empty) -- No style, ever.
-                       ([pure (text initialDisplayText)] |> nextDisplayText)
+    display <- element (pure "span")
+                       (always (pure M.empty)) -- No attributes, ever
+                       (always (pure M.empty)) -- No style, ever.
+                       ((pure [pure (text (pure initialDisplayText))]) |> nextDisplayText)
 
     -- A button to increment.
-    incrButton <- element "input"
-                          (always $ M.fromList [("type", "button"), ("value", "+")])
-                          (always M.empty)
-                          (always [])
+    incrButton <- element (pure "input")
+                          (always (pure (M.fromList [("type", "button"), ("value", "+")])))
+                          (always (pure M.empty))
+                          (always (pure []))
 
     -- A button to decrement.
-    decrButton <- element "input"
-                          (always $ M.fromList [("type", "button"), ("value", "-")])
-                          (always M.empty)
-                          (always [])
+    decrButton <- element (pure "input")
+                          (always (pure (M.fromList [("type", "button"), ("value", "-")])))
+                          (always (pure M.empty))
+                          (always (pure []))
 
     -- A container for the three elements.
-    container <- element "div"
-                         (always M.empty)
-                         (always M.empty)
-                         (always [ pure (node decrButton)
-                                 , pure (node display)
-                                 , pure (node incrButton)
-                                 ]
+    container <- element (pure "div")
+                         (always (pure M.empty))
+                         (always (pure M.empty))
+                         (always (pure [ pure (node decrButton)
+                                       , pure (node display)
+                                       , pure (node incrButton)
+                                       ]
+                                 )
                          )
 
     -- Grab some reactive-banana events from the *virtual* elements. The last
@@ -96,8 +97,8 @@ counter stateSequence = mdo
     let nextDisplayValue :: Event Int
         nextDisplayValue = unionWith const (sequenceRest stateSequence) computedState
 
-    let nextDisplayText :: Event [MomentIO VirtualNode]
-        nextDisplayText = (pure . pure . text . toJSString . show) <$> nextDisplayValue
+    let nextDisplayText :: Applicative m => Event (m [MomentIO (VirtualNode m)])
+        nextDisplayText = (pure . pure . pure . text . pure . toJSString . show) <$> nextDisplayValue
 
     return container
 
@@ -115,7 +116,7 @@ main = runWebGUI $ \webView -> do
             mouseleaves <- virtualEvent vcounter Element.mouseLeave (\_ -> return)
 
             -- Put the counter into a centred container.
-            vcentredCounter <- centred (always (pure (node vcounter)))
+            vcentredCounter <- centred (always (pure (pure (node vcounter))))
 
             -- Render the centred counter.
             render document body vcentredCounter

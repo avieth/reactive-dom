@@ -15,12 +15,14 @@ Portability : non-portable (GHC only)
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE RecursiveDo #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE KindSignatures #-}
 
 module Reactive.DOM.Node where
 
 import Control.Monad
 import Control.Monad.Trans.Reader
 import Control.Monad.IO.Class
+import Data.Functor.Identity
 import Data.Unique
 import qualified Data.Map as M
 import Data.IORef
@@ -61,31 +63,61 @@ data VirtualReactimate where
         -> VirtualReactimate
 
 -- | 
-data VirtualElement = VirtualElement {
+data VirtualElement (m :: * -> *) = VirtualElement {
       virtualElementUnique :: Unique
-    , virtualElementTag :: JSString
-    , virtualElementAttributes :: LiveSequence Attributes
-    , virtualElementStyle :: LiveSequence Style
-    , virtualElementChildren :: LiveSequence [MomentIO VirtualNode]
+    , virtualElementTag :: m JSString
+    , virtualElementAttributes :: LiveSequence (m Attributes)
+    , virtualElementStyle :: LiveSequence (m Style)
+    , virtualElementChildren :: LiveSequence (m [MomentIO (VirtualNode m)])
     , virtualElementEvents :: IORef VirtualElementEvents
     , virtualElementReactimates :: IORef VirtualElementReactimates
     }
 
-instance Eq VirtualElement where
+instance Eq (VirtualElement m) where
     x == y = virtualElementUnique x == virtualElementUnique y
 
-instance Ord VirtualElement where
+instance Ord (VirtualElement m) where
     x `compare` y = virtualElementUnique x `compare` virtualElementUnique y
 
-mapStyle :: (Style -> Style) -> VirtualElement -> VirtualElement
-mapStyle f velem = velem { virtualElementStyle = fmap f (virtualElementStyle velem) }
+velemTrans
+    :: ( Functor m )
+    => (forall t . m t -> n t)
+    -> VirtualElement m
+    -> VirtualElement n
+velemTrans trans velem = velem {
+      virtualElementTag = trans (virtualElementTag velem)
+    , virtualElementAttributes = fmap trans (virtualElementAttributes velem)
+    , virtualElementStyle = fmap trans (virtualElementStyle velem)
+    , virtualElementChildren = fmap (trans . (fmap . fmap . fmap) (vnodeTrans trans)) (virtualElementChildren velem)
+    }
+
+vtextTrans
+    :: ( )
+    => (forall t . m t -> n t)
+    -> VirtualText m
+    -> VirtualText n
+vtextTrans = ($)
+
+vnodeTrans
+    :: ( Functor m )
+    => (forall t . m t -> n t)
+    -> VirtualNode m
+    -> VirtualNode n
+vnodeTrans trans = either (Left . velemTrans trans) (Right . vtextTrans trans)
+
+mapStyle
+     :: Functor m
+     => (Style -> Style)
+     -> VirtualElement m
+     -> VirtualElement m
+mapStyle f velem = velem { virtualElementStyle = (fmap . fmap) f (virtualElementStyle velem) }
 
 data RenderedVirtualElement = RenderedVirtualElement {
       renderedVirtualElementUnique :: Unique
     , renderedVirtualElement :: Element
     }
 
-renderedFrom :: RenderedVirtualElement -> VirtualElement -> Bool
+renderedFrom :: RenderedVirtualElement -> VirtualElement m -> Bool
 renderedFrom x y = renderedVirtualElementUnique x == virtualElementUnique y
 
 data RenderedText = RenderedText {
@@ -98,26 +130,28 @@ renderText
        , MonadIO m
        )
     => document
-    -> JSString
+    -> VirtualText Identity
     -> m RenderedText
 renderText document str = do
-    Just text <- document `createTextNode` str
-    return (RenderedText str text)
+    Just text <- document `createTextNode` (runIdentity str)
+    return (RenderedText (runIdentity str) text)
 
-type VirtualNode = Either VirtualElement JSString
+type VirtualText m = m JSString
+
+type VirtualNode m = Either (VirtualElement m) (VirtualText m)
 type RenderedNode = Either RenderedVirtualElement RenderedText
 
-node :: VirtualElement -> VirtualNode
+node :: VirtualElement m -> VirtualNode m
 node = Left
 
-text :: JSString -> VirtualNode
+text :: m JSString -> VirtualNode m
 text = Right
 
 renderVirtualNode
     :: ( IsDocument document
        )
     => document
-    -> VirtualNode
+    -> VirtualNode Identity
     -> MomentIO RenderedNode
 renderVirtualNode document = either (fmap Left . renderVirtualElement document)
                                     (fmap Right . liftIO . renderText document)
@@ -126,11 +160,11 @@ renderedNode :: RenderedNode -> Node
 renderedNode = either (toNode . renderedVirtualElement) (toNode . renderedTextNode)
 
 virtualElement
-    :: JSString
-    -> Sequence Attributes
-    -> Sequence Style
-    -> Sequence [MomentIO VirtualNode]
-    -> MomentIO VirtualElement
+    :: m JSString
+    -> Sequence (m Attributes)
+    -> Sequence (m Style)
+    -> Sequence (m [(MomentIO (VirtualNode m))])
+    -> MomentIO (VirtualElement m)
 virtualElement tagName attrs style kids = do
     lattrs <- liveSequence attrs
     lstyle <- liveSequence style
@@ -141,24 +175,24 @@ virtualElement tagName attrs style kids = do
     return (VirtualElement unique tagName lattrs lstyle lkids refEvent refReactimate)
 
 element
-    :: JSString
-    -> Sequence Attributes
-    -> Sequence Style
-    -> Sequence [MomentIO VirtualNode]
-    -> MomentIO VirtualElement
+    :: m JSString
+    -> Sequence (m Attributes)
+    -> Sequence (m Style)
+    -> Sequence (m [(MomentIO (VirtualNode m))])
+    -> MomentIO (VirtualElement m)
 element = virtualElement
 
 renderVirtualElement
     :: ( IsDocument document
        )
     => document
-    -> VirtualElement
+    -> VirtualElement Identity
     -> MomentIO RenderedVirtualElement
 renderVirtualElement document velem = do
-    Just el <- document `createElement` (Just (virtualElementTag velem))
-    reactimateAttributes el (virtualElementAttributes velem)
-    reactimateStyle el (virtualElementStyle velem)
-    reactimateChildren document el (virtualElementChildren velem)
+    Just el <- document `createElement` (Just (runIdentity (virtualElementTag velem)))
+    reactimateAttributes el (fmap runIdentity (virtualElementAttributes velem))
+    reactimateStyle el (fmap runIdentity (virtualElementStyle velem))
+    reactimateChildren document el (fmap runIdentity (virtualElementChildren velem))
     events <- liftIO $ readIORef (virtualElementEvents velem)
     wireVirtualEvents el events
     reactimates <- liftIO $ readIORef (virtualElementReactimates velem)
@@ -182,7 +216,7 @@ wireVirtualEvents el vevents = M.foldWithKey (wireVirtualEvent el) (return ()) v
 
 virtualEvent
     :: IsEvent event
-    => VirtualElement
+    => VirtualElement m
     -> EventName Element event
     -> (Element -> event -> IO t)
     -> MomentIO (Event t)
@@ -210,7 +244,7 @@ wireVirtualReactimates el vreactimates = forM_ vreactimates (wireVirtualReactima
 
 virtualReactimate
     :: ( )
-    => VirtualElement
+    => VirtualElement m
     -> Event event
     -> (Element -> event -> IO ())
     -> MomentIO ()
@@ -229,7 +263,7 @@ reactimateChildren
        )
     => document
     -> parent
-    -> LiveSequence [MomentIO VirtualNode]
+    -> LiveSequence [MomentIO (VirtualNode Identity)]
     -> MomentIO ()
 reactimateChildren document parent sequence = mdo
 
@@ -280,7 +314,7 @@ reactimateChildren document parent sequence = mdo
     update
         :: parent
         -> IORef [RenderedNode]
-        -> [MomentIO VirtualNode]
+        -> [MomentIO (VirtualNode Identity)]
         -> MomentIO ()
     update parent current new = do
         currentRendered <- liftIO $ readIORef current
@@ -365,11 +399,11 @@ diffAttributes old new = (toAdd, toRemove)
     toRemove = M.differenceWith justWhenDifferent old new
     justWhenDifferent x y = if x /= y then Just x else Nothing
 
-centred :: Sequence (MomentIO VirtualNode) -> MomentIO VirtualElement
-centred vnodes = element "div"
-                         (always M.empty)
-                         (always centredStyle)
-                         (pure <$> vnodes)
+centred :: Applicative m => Sequence (m (MomentIO (VirtualNode m))) -> MomentIO (VirtualElement m)
+centred vnodes = element (pure "div")
+                         (always (pure M.empty))
+                         (always (pure centredStyle))
+                         ((fmap . fmap) pure vnodes)
   where
     centredStyle :: Style
     centredStyle = M.fromList [
@@ -381,18 +415,22 @@ centred vnodes = element "div"
         , ("height", "100%")
         ]
 
-horizontally :: Sequence [MomentIO VirtualElement] -> MomentIO VirtualElement
-horizontally velems = element "div"
-                              (always M.empty)
-                              (always flexStyle)
-                              ((((fmap . fmap) Left) . alignem) <$> velems)
+horizontally
+    :: forall m . 
+       ( Applicative m )
+    => Sequence (m [(MomentIO (VirtualElement m))])
+    -> MomentIO (VirtualElement m)
+horizontally velems = element (pure "div")
+                              (always (pure M.empty))
+                              (always (pure flexStyle))
+                              ((fmap . fmap) (((fmap . fmap) Left) . alignem) velems)
   where
     flexStyle :: Style
     flexStyle = M.fromList [
           ("display", "flex")
         , ("flex-direction", "row")
         ]
-    alignem :: [MomentIO VirtualElement] -> [MomentIO VirtualElement]
+    alignem :: [MomentIO (VirtualElement m)] -> [MomentIO (VirtualElement m)]
     alignem nodes = let share :: Double
                         share = if length nodes == 0
                                 then 1
@@ -402,18 +440,22 @@ horizontally velems = element "div"
                         setWidth = M.alter (const (Just width)) "width"
                     in  (fmap . fmap) (mapStyle setWidth) nodes
 
-vertically :: Sequence [MomentIO VirtualElement] -> MomentIO VirtualElement
-vertically velems = element "div"
-                            (always M.empty)
-                            (always flexStyle)
-                            ((((fmap . fmap) Left) . alignem) <$> velems)
+vertically
+    :: forall m . 
+       ( Applicative m )
+    => Sequence (m [(MomentIO (VirtualElement m))])
+    -> MomentIO (VirtualElement m)
+vertically velems = element (pure "div")
+                            (always (pure M.empty))
+                            (always (pure flexStyle))
+                            ((fmap . fmap) (((fmap . fmap) Left) . alignem) velems)
   where
     flexStyle :: Style
     flexStyle = M.fromList [
           ("display", "flex")
         , ("flex-direction", "column")
         ]
-    alignem :: [MomentIO VirtualElement] -> [MomentIO VirtualElement]
+    alignem :: [MomentIO (VirtualElement m)] -> [MomentIO (VirtualElement m)]
     alignem nodes = let share :: Double
                         share = if length nodes == 0
                                 then 1
@@ -430,7 +472,7 @@ maybeRender
     => document
     -> parent
     -> Maybe RenderedVirtualElement
-    -> VirtualElement
+    -> VirtualElement Identity
     -> MomentIO RenderedVirtualElement
 maybeRender document parent maybeRendered velem = case maybeRendered of
     Nothing -> render document parent velem
@@ -445,7 +487,7 @@ render
        )
     => document
     -> parent
-    -> VirtualElement
+    -> VirtualElement Identity
     -> MomentIO RenderedVirtualElement
 render document parent vnode = do
     vrendered <- renderVirtualElement document vnode
