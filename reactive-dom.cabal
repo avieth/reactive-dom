@@ -22,6 +22,7 @@ library
                      , Reactive.DOM.Window
                      , Reactive.DOM.XHR
                      , Data.EitherBoth
+                     , Reactive.Eventful
 
   -- other-modules:       
   other-extensions:    AutoDeriveTypeable
