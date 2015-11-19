@@ -160,27 +160,50 @@ renderedNode :: RenderedNode -> Node
 renderedNode = either (toNode . renderedVirtualElement) (toNode . renderedTextNode)
 
 virtualElement
-    :: m JSString
-    -> Sequence (m Attributes)
-    -> Sequence (m Style)
-    -> Sequence (m [(MomentIO (VirtualNode m))])
+    :: ( Applicative m )
+    => m JSString
+    -> Event (m Attributes)
+    -> Event (m Style)
+    -> Event (m [(MomentIO (VirtualNode m))])
     -> MomentIO (VirtualElement m)
 virtualElement tagName attrs style kids = do
-    lattrs <- liveSequence attrs
-    lstyle <- liveSequence style
-    lkids <- liveSequence kids
+
+    lattrs <- fromEvent (pure mempty) attrs
+    lstyle <- fromEvent (pure mempty) style
+    lkids <- fromEvent (pure mempty) kids
+
+    {-
+    -- We gather behaviors for the attributes, style, and children...
+    battrs <- stepper (pure mempty) attrs
+    bstyle <- stepper (pure mempty) style
+    bkids <- stepper (pure mempty) kids
+
+    -- ... and we synthesize events which forward changes in those behaviors.
+    -- Useful for, say, rendering a virtual element whenever anything about it
+    -- changes.
+    -- NB if we check the value of those behaviors inside an @execute@ on the
+    -- events from which they were generated, we get the previous value, not
+    -- the latest, and that's not what we want. By forwarding the events, we
+    -- obtain the latest value.
+    let forward :: Behavior t -> (t -> IO ()) -> MomentIO ()
+        forward b f = do
+            t <- valueB b
+            liftIO $ f t
+
+    (evAttrs, fireAttrs) <- newEvent
+    (evStyle, fireStyle) <- newEvent
+    (evKids, fireKids) <- newEvent
+
+    execute (const (forward battrs fireAttrs) <$> attrs)
+    execute (const (forward bstyle fireStyle) <$> style)
+    execute (const (forward bkids fireKids) <$> kids)
+    -}
+
     unique <- liftIO $ newUnique
     refEvent <- liftIO $ newIORef M.empty
     refReactimate <- liftIO $ newIORef []
-    return (VirtualElement unique tagName lattrs lstyle lkids refEvent refReactimate)
 
-element
-    :: m JSString
-    -> Sequence (m Attributes)
-    -> Sequence (m Style)
-    -> Sequence (m [(MomentIO (VirtualNode m))])
-    -> MomentIO (VirtualElement m)
-element = virtualElement
+    return (VirtualElement unique tagName lattrs lstyle lkids refEvent refReactimate)
 
 renderVirtualElement
     :: ( IsDocument document
@@ -265,41 +288,15 @@ reactimateChildren
     -> parent
     -> LiveSequence [MomentIO (VirtualNode Identity)]
     -> MomentIO ()
-reactimateChildren document parent sequence = mdo
-
-    -- Use the first element of the sequence to render all children.
-    cur <- sequenceCurrent sequence
-    firsts <- forM cur ((=<<) (renderVirtualNode document))
-    forM_ firsts (appendChild parent . Just . renderedNode)
-
-    -- We need to have the list of currently rendered elements, so that we can
-    -- compare them with the new list (from sequence) and so that we have the
-    -- actual @Element@ values to use in @removeChild@. One way to grab this is
-    -- via @newBehavior@, calling its update mechanism whenever we change the
-    -- children here. So in the @update@ function which will be fmapped into
-    -- the event in @sequence@, responsible for updating the DOM here, we would
-    -- have something like
-    --      liftIO $ setCurrent newRendered
-    -- but I found that this causes event bindings set up in @wireVirtualEvents@
-    -- to fail. The part where they fire the relevant reactive-banana event
-    -- would simply quit; no exception, it would just quit, so that a print
-    -- statement before this action would run, but a print statement after it
-    -- would *not* run!
-    -- Anyway, by using an IORef here to manually store the list of current
-    -- children, the problem doesn't arise.
-    --
-    --(currentlyRendered, changeCurrentlyRendered) <- newBehavior firsts
-    --let changes :: Event ([RenderedVirtualElement], [VirtualElement])
-    --    changes = (,) <$> currentlyRendered <@> (sequenceRest sequence)
-
-    currentlyRendered <- liftIO $ newIORef firsts
-
-    execute (update parent currentlyRendered <$> sequenceNext sequence)
-
+reactimateChildren document parent lchildren = do
+    first <- sequenceCurrent lchildren
+    rendered <- forM first ((=<<) (renderVirtualNode document))
+    forM_ rendered (appendChild parent . Just . renderedNode)
+    currentlyRendered <- liftIO $ newIORef rendered
+    ev <- immediatelyAfter (sequenceNext lchildren)
+    execute (update parent currentlyRendered <$> ev)
     return ()
-
   where
-
     -- A stupid, minimally efficient diff: remove all old, add all new.
     -- We do one check: if everything in the list is JavaScript equal to
     -- its counterpart in the other, we can do nothing.
@@ -310,7 +307,6 @@ reactimateChildren document parent sequence = mdo
         then ([], [])
         else (old, new)
     -}
-
     update
         :: parent
         -> IORef [RenderedNode]
@@ -328,16 +324,16 @@ type Style = M.Map JSString JSString
 
 reactimateStyle :: Element -> LiveSequence Style -> MomentIO ()
 reactimateStyle element sequence = do
-    cur <- sequenceCurrent sequence
-    liftIO $ addStyle element cur
-    currentStyle <- liftIO $ newIORef cur
+    first <- sequenceCurrent sequence
+    liftIO $ addStyle element first
+    currentStyle <- liftIO $ newIORef first
     let changeStyle new = do
             current <- readIORef currentStyle
             let (add, remove) = diffStyle current new
             removeStyle element remove
             addStyle element add
             writeIORef currentStyle new
-    reactimate (changeStyle <$> (sequenceNext sequence))
+    reactimate (changeStyle <$> sequenceNext sequence)
     return ()
 
 addStyle :: Element -> M.Map JSString JSString -> IO ()
@@ -369,16 +365,16 @@ type Attributes = M.Map JSString JSString
 
 reactimateAttributes :: Element -> LiveSequence Attributes -> MomentIO ()
 reactimateAttributes element sequence = do
-    cur <- sequenceCurrent sequence
-    liftIO $ addAttributes element cur
-    currentAttributes <- liftIO $ newIORef cur
+    first <- sequenceCurrent sequence
+    liftIO $ addAttributes element first
+    currentAttributes <- liftIO $ newIORef first
     let changeAttributes new = do
             current <- readIORef currentAttributes
             let (add, remove) = diffAttributes current new
             removeAttributes element remove
             addAttributes element add
             writeIORef currentAttributes new
-    reactimate (changeAttributes <$> (sequenceNext sequence))
+    reactimate (changeAttributes <$> sequenceNext sequence)
     return ()
 
 addAttributes :: Element -> M.Map JSString JSString -> IO ()
@@ -399,71 +395,6 @@ diffAttributes old new = (toAdd, toRemove)
     toRemove = M.differenceWith justWhenDifferent old new
     justWhenDifferent x y = if x /= y then Just x else Nothing
 
-centred :: Applicative m => Sequence (m (MomentIO (VirtualNode m))) -> MomentIO (VirtualElement m)
-centred vnodes = element (pure "div")
-                         (always (pure M.empty))
-                         (always (pure centredStyle))
-                         ((fmap . fmap) pure vnodes)
-  where
-    centredStyle :: Style
-    centredStyle = M.fromList [
-          ("display", "flex")
-        , ("justify-content", "center")
-        , ("align-items", "center")
-        , ("position", "absolute")
-        , ("width", "100%")
-        , ("height", "100%")
-        ]
-
-horizontally
-    :: forall m . 
-       ( Applicative m )
-    => Sequence (m [(MomentIO (VirtualElement m))])
-    -> MomentIO (VirtualElement m)
-horizontally velems = element (pure "div")
-                              (always (pure M.empty))
-                              (always (pure flexStyle))
-                              ((fmap . fmap) (((fmap . fmap) Left) . alignem) velems)
-  where
-    flexStyle :: Style
-    flexStyle = M.fromList [
-          ("display", "flex")
-        , ("flex-direction", "row")
-        ]
-    alignem :: [MomentIO (VirtualElement m)] -> [MomentIO (VirtualElement m)]
-    alignem nodes = let share :: Double
-                        share = if length nodes == 0
-                                then 1
-                                else 1 / fromIntegral (length nodes)
-                        width = toJSString (show (share * 100) ++ "%")
-                        setWidth :: Style -> Style
-                        setWidth = M.alter (const (Just width)) "width"
-                    in  (fmap . fmap) (mapStyle setWidth) nodes
-
-vertically
-    :: forall m . 
-       ( Applicative m )
-    => Sequence (m [(MomentIO (VirtualElement m))])
-    -> MomentIO (VirtualElement m)
-vertically velems = element (pure "div")
-                            (always (pure M.empty))
-                            (always (pure flexStyle))
-                            ((fmap . fmap) (((fmap . fmap) Left) . alignem) velems)
-  where
-    flexStyle :: Style
-    flexStyle = M.fromList [
-          ("display", "flex")
-        , ("flex-direction", "column")
-        ]
-    alignem :: [MomentIO (VirtualElement m)] -> [MomentIO (VirtualElement m)]
-    alignem nodes = let share :: Double
-                        share = if length nodes == 0
-                                then 1
-                                else 1 / fromIntegral (length nodes)
-                        height = toJSString (show (share * 100) ++ "%")
-                        setHeight :: Style -> Style
-                        setHeight = M.alter (const (Just height)) "height"
-                    in  (fmap . fmap) (mapStyle setHeight) nodes
 
 maybeRender
     :: ( IsElement parent

@@ -14,6 +14,7 @@ Portability : non-portable (GHC only)
 
 module Reactive.DOM.XHR where
 
+import Control.Arrow
 import Control.Monad (forM_)
 import Control.Monad.Trans.Reader (ask)
 import Control.Monad.IO.Class
@@ -34,6 +35,7 @@ import GHCJS.DOM.EventM
 import Reactive.Banana.Combinators as Banana
 import Reactive.Banana.Frameworks
 import Reactive.Sequence
+import Reactive.Eventful
 import Reactive.EventTransformer
 
 type XHRURL = JSString
@@ -71,10 +73,16 @@ type XHRPending = Unique
 xhrResponses :: Banana.Event (EitherBoth XHRPending t) -> Banana.Event t 
 xhrResponses = filterJust . fmap (bifoldl (const) (const Just) Nothing)
 
--- | Request comes in, you get a pending event, which can be used to abort 
---   the request.
-xhr :: EventTransformer (EitherBoth XHRAbort XHRRequest) (EitherBoth XHRPending XHRResponse)
-xhr = EventTransformer $ \ev -> do
+xhr' :: XHRRequest -> MomentIO (Banana.Event XHRResponse)
+xhr' = fmap fst . makeXHRFromRequest
+
+-- | Input: either abort an existing request or start a new request.
+--   Output: a pending request, which can be fed back in to abort it, or
+--   a response.
+xhr
+    :: EventTransformer (EitherBoth XHRAbort XHRRequest)
+                        (EitherBoth XHRPending XHRResponse)
+xhr = Kleisli $ \ev -> do
 
           xhrs :: IORef (M.Map Unique XMLHttpRequest) <- liftIO $ newIORef M.empty
 
@@ -86,7 +94,7 @@ xhr = EventTransformer $ \ev -> do
           let req :: EitherBoth XHRAbort XHRRequest -> MomentIO (EitherBoth () (Unique, Banana.Event XHRResponse))
               req = bitraverse (cancelXHR xhrs) (spawnXHR xhrs)
           out :: Banana.Event (EitherBoth () (Unique, Banana.Event XHRResponse))
-              <- execute (req <$> ev)
+              <- eventful $ execute (req <$> ev)
 
           -- Now we use the event @out@ to produce something of type
           -- 
