@@ -82,9 +82,6 @@ xhr' = Kleisli $ \ev -> do
            let responses' = OneRight <$> responses
            let unioner left right = case (left, right) of
                    (OneLeft x, OneRight y) -> Both x y
-           eventful $ reactimate (const (putStrLn "Pending1") <$> ev)
-           eventful $ reactimate (const (putStrLn "Pending2") <$> ev')
-           eventful $ reactimate (const (putStrLn "Done") <$> responses')
            return $ unionWith unioner ev' responses'
 
 -- | Input: either abort an existing request or start a new request.
@@ -171,19 +168,17 @@ spawnXHR ref req = do
 makeXHRFromRequest :: XHRRequest -> MomentIO (Banana.Event XHRResponse, XMLHttpRequest)
 makeXHRFromRequest xhrRequest = do
     xhrObject <- newXMLHttpRequest
-    liftIO $ putStrLn "Opening XHR"
     open xhrObject (show (xhrRequestMethod xhrRequest))
                    (xhrRequestURL xhrRequest)
                    (Just True) -- True meaning do not block
                    (Nothing :: Maybe JSString)
                    (Nothing :: Maybe JSString)
-    liftIO $ putStrLn "Opened XHR"
     forM_ (xhrRequestHeaders xhrRequest) (uncurry (setRequestHeader xhrObject))
     -- Seems we must actually write out the concurrency here in Haskell. Even
     -- though our XHR is asynchronous, it blocks a Haskell thread.
     thread <- case xhrRequestBody xhrRequest of
-        Nothing -> liftIO (putStrLn "Sending XHR with no body" >> async (send xhrObject))
-        Just str -> liftIO (putStrLn "Sending XHR with body" >> async (sendString xhrObject str))
+        Nothing -> liftIO (async (send xhrObject))
+        Just str -> liftIO (async (sendString xhrObject str))
     (ev, fire) <- newEvent
     liftIO $ on xhrObject readyStateChange $ do
                  readyState <- getReadyState xhrObject
@@ -192,5 +187,4 @@ makeXHRFromRequest xhrRequest = do
                  else do status <- getStatus xhrObject
                          responseText <- getResponseText xhrObject
                          liftIO $ fire (XHRResponse (fromIntegral status) responseText)
-    liftIO $ putStrLn "XHR in flight"
     return (ev, xhrObject)
