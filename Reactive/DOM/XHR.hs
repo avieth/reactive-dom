@@ -18,6 +18,7 @@ import Control.Arrow
 import Control.Monad (forM_)
 import Control.Monad.Trans.Reader (ask)
 import Control.Monad.IO.Class
+import Control.Concurrent.Async
 import Data.IORef
 import Data.Unique
 import Data.Monoid
@@ -29,8 +30,8 @@ import qualified Data.Map as M
 import GHCJS.Types
 import GHCJS.DOM.Types
 import GHCJS.DOM.Element as Element
-import GHCJS.DOM.XMLHttpRequest as XHR hiding (send)
-import GHCJS.DOM.JSFFI.XMLHttpRequest as XHR
+import GHCJS.DOM.XMLHttpRequest as XHR
+import GHCJS.DOM.JSFFI.XMLHttpRequest as XHR hiding (send)
 import GHCJS.DOM.EventM
 import Reactive.Banana.Combinators as Banana
 import Reactive.Banana.Frameworks
@@ -73,8 +74,18 @@ type XHRPending = Unique
 xhrResponses :: Banana.Event (EitherBoth XHRPending t) -> Banana.Event t 
 xhrResponses = filterJust . fmap (bifoldl (const) (const Just) Nothing)
 
-xhr' :: XHRRequest -> MomentIO (Banana.Event XHRResponse)
-xhr' = fmap fst . makeXHRFromRequest
+xhr' :: EventTransformer XHRRequest (EitherBoth () XHRResponse)
+xhr' = Kleisli $ \ev -> do
+           out <- eventful $ execute (makeXHRFromRequest <$> ev)
+           let responses = switchE (fst <$> out)
+           let ev' = const (OneLeft ()) <$> ev
+           let responses' = OneRight <$> responses
+           let unioner left right = case (left, right) of
+                   (OneLeft x, OneRight y) -> Both x y
+           eventful $ reactimate (const (putStrLn "Pending1") <$> ev)
+           eventful $ reactimate (const (putStrLn "Pending2") <$> ev')
+           eventful $ reactimate (const (putStrLn "Done") <$> responses')
+           return $ unionWith unioner ev' responses'
 
 -- | Input: either abort an existing request or start a new request.
 --   Output: a pending request, which can be fed back in to abort it, or
@@ -160,12 +171,19 @@ spawnXHR ref req = do
 makeXHRFromRequest :: XHRRequest -> MomentIO (Banana.Event XHRResponse, XMLHttpRequest)
 makeXHRFromRequest xhrRequest = do
     xhrObject <- newXMLHttpRequest
+    liftIO $ putStrLn "Opening XHR"
     open xhrObject (show (xhrRequestMethod xhrRequest))
                    (xhrRequestURL xhrRequest)
-                   (Just True)
+                   (Just True) -- True meaning do not block
                    (Nothing :: Maybe JSString)
                    (Nothing :: Maybe JSString)
+    liftIO $ putStrLn "Opened XHR"
     forM_ (xhrRequestHeaders xhrRequest) (uncurry (setRequestHeader xhrObject))
+    -- Seems we must actually write out the concurrency here in Haskell. Even
+    -- though our XHR is asynchronous, it blocks a Haskell thread.
+    thread <- case xhrRequestBody xhrRequest of
+        Nothing -> liftIO (putStrLn "Sending XHR with no body" >> async (send xhrObject))
+        Just str -> liftIO (putStrLn "Sending XHR with body" >> async (sendString xhrObject str))
     (ev, fire) <- newEvent
     liftIO $ on xhrObject readyStateChange $ do
                  readyState <- getReadyState xhrObject
@@ -174,7 +192,5 @@ makeXHRFromRequest xhrRequest = do
                  else do status <- getStatus xhrObject
                          responseText <- getResponseText xhrObject
                          liftIO $ fire (XHRResponse (fromIntegral status) responseText)
-    case xhrRequestBody xhrRequest of
-        Nothing -> send xhrObject
-        Just str -> sendString xhrObject str
+    liftIO $ putStrLn "XHR in flight"
     return (ev, xhrObject)
