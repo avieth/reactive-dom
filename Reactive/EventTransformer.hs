@@ -33,9 +33,6 @@ eventTransformerNever = Kleisli $ \_ -> return never
 runEventTransformer :: EventTransformer s t -> Event s -> Eventful (Event t)
 runEventTransformer = runKleisli
 
-liftEvent :: Kleisli MomentIO s t -> EventTransformer s t
-liftEvent kl = Kleisli $ eventful . execute . fmap (runKleisli kl)
-
 {-
 -- | When the input event fires, we fire an event with the behavior sampled
 --   at the time of the input event firing.

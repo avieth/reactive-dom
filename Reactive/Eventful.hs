@@ -21,16 +21,21 @@ module Reactive.Eventful (
     , eventful
     , runEventful
     , initial
-    , always
     , andThen
-    , (|>)
+    , (||>)
 
     , ComposableEvent
     , composableEvent
     , runComposableEvent
 
+    , ArrowEvent
+    , runArrowEvent
+
     ) where
 
+import Prelude hiding (id, (.))
+import Control.Category
+import Control.Arrow
 import Control.Monad.Fix
 import Control.Monad.IO.Class
 import Control.Monad.Trans.Class
@@ -59,20 +64,17 @@ eventful = Eventful . lift
 runEventful :: Eventful t -> Event () -> MomentIO t
 runEventful = runReaderT . outEventful
 
-initial :: Eventful (Event ())
-initial = Eventful ask
-
-always :: t -> Eventful (Event t)
-always x = do
-    initialEvent <- initial
-    return (const x <$> initialEvent)
+initial :: t -> Eventful (Event t)
+initial t = Eventful $ do
+    i <- ask
+    return (const t <$> i)
 
 andThen :: t -> Event t -> Eventful (Event t)
 andThen first rest = do
-    evFirst <- always first
+    evFirst <- initial first
     return (unionWith const rest evFirst)
 
-(|>) = andThen
+(||>) = andThen
 
 -- | Like an Event, but with an Applicative instance!
 newtype ComposableEvent t = ComposableEvent {
@@ -82,7 +84,7 @@ newtype ComposableEvent t = ComposableEvent {
 deriving instance Functor ComposableEvent
 
 instance Applicative ComposableEvent where
-    pure = ComposableEvent . always
+    pure = ComposableEvent . initial
     mf <*> mx = uncurry ($) <$> bundle mf mx
 
 composableEvent :: Eventful (Event t) -> ComposableEvent t
@@ -90,6 +92,32 @@ composableEvent = ComposableEvent
 
 runComposableEvent :: ComposableEvent t -> Eventful (Event t)
 runComposableEvent = outComposableEvent
+
+-- | Like an Event, but with an Arrow instance whenever @a@ is an Arrow!
+newtype ArrowEvent a s t = ArrowEvent {
+      outArrowEvent :: Eventful (Event (a s t))
+    }
+
+instance Category a => Category (ArrowEvent a) where
+    id = ArrowEvent (initial id)
+    left . right = ArrowEvent $ do let left' = composableEvent (outArrowEvent left)
+                                   let right' = composableEvent (outArrowEvent right)
+                                   let composed = (.) <$> left' <*> right'
+                                   runComposableEvent composed
+
+instance Arrow a => Arrow (ArrowEvent a) where
+    arr = ArrowEvent . initial . arr
+    first ar = ArrowEvent $ do let ar' = composableEvent (outArrowEvent ar)
+                               let composed = first <$> ar'
+                               runComposableEvent composed
+
+instance ArrowChoice a => ArrowChoice (ArrowEvent a) where
+    left ar = ArrowEvent $ do let ar' = composableEvent (outArrowEvent ar)
+                              let composed = left <$> ar'
+                              runComposableEvent composed
+
+runArrowEvent :: ArrowEvent a s t -> Eventful (Event (a s t))
+runArrowEvent = outArrowEvent
 
 -- | This is an equivalent formulation of @<*>@ for @ComposableEvent@:
 --

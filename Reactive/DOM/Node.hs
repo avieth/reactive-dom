@@ -16,6 +16,7 @@ Portability : non-portable (GHC only)
 {-# LANGUAGE RecursiveDo #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE FlexibleInstances #-}
 
 module Reactive.DOM.Node where
 
@@ -40,6 +41,10 @@ import Reactive.Banana.Frameworks
 import Reactive.Sequence
 import Unsafe.Coerce
 
+type Properties = M.Map JSString JSString
+type Style = M.Map JSString JSString
+type Attributes = M.Map JSString JSString
+
 type VirtualElementEvents = M.Map DOMString VirtualEvent
 
 -- | Contains a reactive-banana Event and a way to fire it.
@@ -62,13 +67,34 @@ data VirtualReactimate where
         -> (Element -> event -> IO ())
         -> VirtualReactimate
 
+type NaturalTransformation m n = forall t . m t -> n t
+
+{-
+data Eval m t where
+    Eval :: m t -> (forall s . m s -> s) -> Eval m t
+
+instance Functor m => Functor (Eval m) where
+    fmap f (Eval x g) = Eval (f <$> x) g
+
+instance Applicative (Eval Identity) where
+    pure x = Eval (pure x) runIdentity
+    (Eval f _) <*> (Eval x _) = Eval (f <*> x) runIdentity
+
+makeEval :: (forall s . m s -> s) -> m t -> Eval m t
+makeEval f x = Eval x f
+
+eval :: Eval m t -> t
+eval (Eval x f) = f x
+-}
+
 -- | 
 data VirtualElement (m :: * -> *) = VirtualElement {
       virtualElementUnique :: Unique
     , virtualElementTag :: m JSString
-    , virtualElementAttributes :: LiveSequence (m Attributes)
-    , virtualElementStyle :: LiveSequence (m Style)
-    , virtualElementChildren :: LiveSequence (m [MomentIO (VirtualNode m)])
+    , virtualElementProperties :: m (Sequence Properties)
+    , virtualElementAttributes :: m (Sequence Attributes)
+    , virtualElementStyle :: m (Sequence Style)
+    , virtualElementChildren :: m (Sequence [MomentIO (VirtualNode m)])
     , virtualElementEvents :: IORef VirtualElementEvents
     , virtualElementReactimates :: IORef VirtualElementReactimates
     }
@@ -79,21 +105,24 @@ instance Eq (VirtualElement m) where
 instance Ord (VirtualElement m) where
     x `compare` y = virtualElementUnique x `compare` virtualElementUnique y
 
+type VirtualText m = m JSString
+
 velemTrans
     :: ( Functor m )
-    => (forall t . m t -> n t)
+    => NaturalTransformation m n
     -> VirtualElement m
     -> VirtualElement n
 velemTrans trans velem = velem {
       virtualElementTag = trans (virtualElementTag velem)
-    , virtualElementAttributes = fmap trans (virtualElementAttributes velem)
-    , virtualElementStyle = fmap trans (virtualElementStyle velem)
-    , virtualElementChildren = fmap (trans . (fmap . fmap . fmap) (vnodeTrans trans)) (virtualElementChildren velem)
+    , virtualElementProperties = trans (virtualElementProperties velem)
+    , virtualElementAttributes = trans (virtualElementAttributes velem)
+    , virtualElementStyle = trans (virtualElementStyle velem)
+    , virtualElementChildren = trans ((fmap . fmap . fmap . fmap) (vnodeTrans trans) (virtualElementChildren velem))
     }
 
 vtextTrans
     :: ( )
-    => (forall t . m t -> n t)
+    => NaturalTransformation m n
     -> VirtualText m
     -> VirtualText n
 vtextTrans = ($)
@@ -127,16 +156,14 @@ data RenderedText = RenderedText {
 
 renderText
     :: ( IsDocument document
-       , MonadIO m
+       , MonadIO n
        )
     => document
     -> VirtualText Identity
-    -> m RenderedText
+    -> n RenderedText
 renderText document str = do
     Just text <- document `createTextNode` (runIdentity str)
     return (RenderedText (runIdentity str) text)
-
-type VirtualText m = m JSString
 
 type VirtualNode m = Either (VirtualElement m) (VirtualText m)
 type RenderedNode = Either RenderedVirtualElement RenderedText
@@ -162,48 +189,16 @@ renderedNode = either (toNode . renderedVirtualElement) (toNode . renderedTextNo
 virtualElement
     :: ( Applicative m )
     => m JSString
-    -> Event (m Attributes)
-    -> Event (m Style)
-    -> Event (m [(MomentIO (VirtualNode m))])
+    -> m (Sequence Properties)
+    -> m (Sequence Attributes)
+    -> m (Sequence Style)
+    -> m (Sequence [MomentIO (VirtualNode m)])
     -> MomentIO (VirtualElement m)
-virtualElement tagName attrs style kids = do
-
-    lattrs <- fromEvent (pure mempty) attrs
-    lstyle <- fromEvent (pure mempty) style
-    lkids <- fromEvent (pure mempty) kids
-
-    {-
-    -- We gather behaviors for the attributes, style, and children...
-    battrs <- stepper (pure mempty) attrs
-    bstyle <- stepper (pure mempty) style
-    bkids <- stepper (pure mempty) kids
-
-    -- ... and we synthesize events which forward changes in those behaviors.
-    -- Useful for, say, rendering a virtual element whenever anything about it
-    -- changes.
-    -- NB if we check the value of those behaviors inside an @execute@ on the
-    -- events from which they were generated, we get the previous value, not
-    -- the latest, and that's not what we want. By forwarding the events, we
-    -- obtain the latest value.
-    let forward :: Behavior t -> (t -> IO ()) -> MomentIO ()
-        forward b f = do
-            t <- valueB b
-            liftIO $ f t
-
-    (evAttrs, fireAttrs) <- newEvent
-    (evStyle, fireStyle) <- newEvent
-    (evKids, fireKids) <- newEvent
-
-    execute (const (forward battrs fireAttrs) <$> attrs)
-    execute (const (forward bstyle fireStyle) <$> style)
-    execute (const (forward bkids fireKids) <$> kids)
-    -}
-
+virtualElement tagName props attrs style kids = do
     unique <- liftIO $ newUnique
     refEvent <- liftIO $ newIORef M.empty
     refReactimate <- liftIO $ newIORef []
-
-    return (VirtualElement unique tagName lattrs lstyle lkids refEvent refReactimate)
+    return (VirtualElement unique tagName props attrs style kids refEvent refReactimate)
 
 renderVirtualElement
     :: ( IsDocument document
@@ -213,9 +208,10 @@ renderVirtualElement
     -> MomentIO RenderedVirtualElement
 renderVirtualElement document velem = do
     Just el <- document `createElement` (Just (runIdentity (virtualElementTag velem)))
-    reactimateAttributes el (fmap runIdentity (virtualElementAttributes velem))
-    reactimateStyle el (fmap runIdentity (virtualElementStyle velem))
-    reactimateChildren document el (fmap runIdentity (virtualElementChildren velem))
+    reactimateProperties el (runIdentity (virtualElementProperties velem))
+    reactimateAttributes el (runIdentity (virtualElementAttributes velem))
+    reactimateStyle el (runIdentity (virtualElementStyle velem))
+    reactimateChildren document el (runIdentity (virtualElementChildren velem))
     events <- liftIO $ readIORef (virtualElementEvents velem)
     wireVirtualEvents el events
     reactimates <- liftIO $ readIORef (virtualElementReactimates velem)
@@ -286,15 +282,16 @@ reactimateChildren
        )
     => document
     -> parent
-    -> LiveSequence [MomentIO (VirtualNode Identity)]
+    -> Sequence [MomentIO (VirtualNode Identity)]
     -> MomentIO ()
-reactimateChildren document parent lchildren = do
-    first <- sequenceCurrent lchildren
+reactimateChildren document parent children = do
+    first <- sequenceFirst children
     rendered <- forM first ((=<<) (renderVirtualNode document))
     forM_ rendered (appendChild parent . Just . renderedNode)
     currentlyRendered <- liftIO $ newIORef rendered
-    ev <- immediatelyAfter (sequenceNext lchildren)
-    execute (update parent currentlyRendered <$> ev)
+    ev <- sequenceRest children
+    ev' <- immediatelyAfter ev
+    execute (update parent currentlyRendered <$> ev')
     return ()
   where
     -- A stupid, minimally efficient diff: remove all old, add all new.
@@ -320,11 +317,55 @@ reactimateChildren document parent lchildren = do
         liftIO $ writeIORef current newRendered
         return ()
 
-type Style = M.Map JSString JSString
+foreign import javascript unsafe "$1[$2]=$3;" js_setJSProperty
+    :: Element -> JSString -> Nullable JSString -> IO ()
 
-reactimateStyle :: Element -> LiveSequence Style -> MomentIO ()
+foreign import javascript unsafe "delete $1[$2];" js_removeJSProperty
+    :: Element -> JSString -> IO (Nullable JSString)
+
+setJSProperty :: Element -> JSString -> Maybe JSString -> IO ()
+setJSProperty el x y = js_setJSProperty el x (maybeToNullable y)
+
+removeJSProperty :: Element -> JSString -> IO (Maybe JSString)
+removeJSProperty el x = nullableToMaybe <$> js_removeJSProperty el x
+
+reactimateProperties :: Element -> Sequence Properties -> MomentIO ()
+reactimateProperties element sequence = do
+    first <- sequenceFirst sequence
+    liftIO $ addProperties element first
+    currentProperties <- liftIO $ newIORef first
+    let changeProperties new = do
+            current <- readIORef currentProperties
+            let (add, remove) = diffProperties current new
+            removeProperties element remove
+            addProperties element add
+            writeIORef currentProperties new
+    ev <- sequenceRest sequence
+    reactimate (changeProperties <$> ev)
+    return ()
+
+addProperties :: Element -> M.Map JSString JSString -> IO ()
+addProperties element properties = do
+    let propertiesList :: [(JSString, Maybe JSString)]
+        propertiesList = M.foldWithKey (\x y -> (:) (x, Just y)) [] properties
+    forM_ propertiesList (\(x, y) -> setJSProperty element x y)
+
+removeProperties :: Element -> M.Map JSString JSString -> IO ()
+removeProperties element properties = do
+    let propertyNames :: [JSString]
+        propertyNames = M.keys properties
+    _ :: [Maybe JSString] <- forM propertyNames (removeJSProperty element)
+    return ()
+
+diffProperties old new = (toAdd, toRemove)
+  where
+    toAdd = M.differenceWith justWhenDifferent new old
+    toRemove = M.differenceWith justWhenDifferent old new
+    justWhenDifferent x y = if x /= y then Just x else Nothing
+
+reactimateStyle :: Element -> Sequence Style -> MomentIO ()
 reactimateStyle element sequence = do
-    first <- sequenceCurrent sequence
+    first <- sequenceFirst sequence
     liftIO $ addStyle element first
     currentStyle <- liftIO $ newIORef first
     let changeStyle new = do
@@ -333,7 +374,8 @@ reactimateStyle element sequence = do
             removeStyle element remove
             addStyle element add
             writeIORef currentStyle new
-    reactimate (changeStyle <$> sequenceNext sequence)
+    ev <- sequenceRest sequence
+    reactimate (changeStyle <$> ev)
     return ()
 
 addStyle :: Element -> M.Map JSString JSString -> IO ()
@@ -361,11 +403,9 @@ diffStyle oldStyle newStyle = (toAdd, toRemove)
     toRemove = M.differenceWith justWhenDifferent oldStyle newStyle
     justWhenDifferent x y = if x /= y then Just x else Nothing
 
-type Attributes = M.Map JSString JSString
-
-reactimateAttributes :: Element -> LiveSequence Attributes -> MomentIO ()
+reactimateAttributes :: Element -> Sequence Attributes -> MomentIO ()
 reactimateAttributes element sequence = do
-    first <- sequenceCurrent sequence
+    first <- sequenceFirst sequence
     liftIO $ addAttributes element first
     currentAttributes <- liftIO $ newIORef first
     let changeAttributes new = do
@@ -374,7 +414,8 @@ reactimateAttributes element sequence = do
             removeAttributes element remove
             addAttributes element add
             writeIORef currentAttributes new
-    reactimate (changeAttributes <$> sequenceNext sequence)
+    ev <- sequenceRest sequence
+    reactimate (changeAttributes <$> ev)
     return ()
 
 addAttributes :: Element -> M.Map JSString JSString -> IO ()
@@ -394,7 +435,6 @@ diffAttributes old new = (toAdd, toRemove)
     toAdd = M.differenceWith justWhenDifferent new old
     toRemove = M.differenceWith justWhenDifferent old new
     justWhenDifferent x y = if x /= y then Just x else Nothing
-
 
 maybeRender
     :: ( IsElement parent
@@ -434,4 +474,3 @@ unrender
 unrender parent vrendered = do
     parent `removeChild` (Just (renderedVirtualElement vrendered))
     return ()
-

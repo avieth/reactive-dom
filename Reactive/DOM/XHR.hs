@@ -63,19 +63,17 @@ data XHRRequest = XHRRequest {
     }
 
 -- You get only the status code and the response text.
-data XHRResponse = XHRResponse {
+data XHRResponse body = XHRResponse {
       xhrResponseStatus :: XHRStatus
-    , xhrResponseBody :: Maybe JSString
+    , xhrResponseBody :: Maybe body
     }
 
-type XHRAbort = Unique
-type XHRPending = Unique
-
-xhrResponses :: Banana.Event (EitherBoth XHRPending t) -> Banana.Event t 
-xhrResponses = filterJust . fmap (bifoldl (const) (const Just) Nothing)
-
-xhr' :: EventTransformer XHRRequest (EitherBoth () XHRResponse)
-xhr' = Kleisli $ \ev -> do
+{-
+-- | The output type is EitherBoth because we need to indicate that a request
+--   is launch and/or a response has been received. These could happen
+--   simultaneously, although it's probably a very rare case.
+xhr :: FromJSString body => EventTransformer XHRRequest (EitherBoth () (XHRResponse body))
+xhr = Kleisli $ \ev -> do
            out <- eventful $ execute (makeXHRFromRequest <$> ev)
            let responses = switchE (fst <$> out)
            let ev' = const (OneLeft ()) <$> ev
@@ -83,14 +81,86 @@ xhr' = Kleisli $ \ev -> do
            let unioner left right = case (left, right) of
                    (OneLeft x, OneRight y) -> Both x y
            return $ unionWith unioner ev' responses'
+-}
 
+-- | We choose Sequence (Maybe XHRRequest) because this allows the user to
+--   immediately spawn a request (Just request |> event) or to wait and just
+--   use an event (Nothing |> event).
+--
+--   TODO it's annoying that users who have a proper sequence (not with its
+--   type parameter wrapped in Maybe) still have to check for Nothing.
+--   I suppose we could solve this by typeclassing sequence.
+--
+--     instance IsSequence Event
+--     instance IsSequence Sequence
+--
+--   and have xhr give back an Event if you give an Event, a Sequence if you
+--   give a Sequence.
+xhr
+    :: forall body .
+       FromJSString body
+    => Kleisli MomentIO
+               (Sequence (Maybe XHRRequest)) 
+               (Sequence (Maybe (EitherBoth () (XHRResponse body))))
+xhr = Kleisli $ \sequence -> do
+    -- Every non-Nothing hit of the sequence means there's a pending request.
+    let pendings :: Sequence (Maybe (EitherBoth () (XHRResponse body)))
+        pendings = (fmap . fmap) (const (OneLeft ())) sequence
+    -- Every non-Nothing hit of the sequence also spawns a request.
+    let spawns :: Sequence (Maybe (MomentIO (Banana.Event (XHRResponse body), XMLHttpRequest)))
+        spawns = (fmap . fmap) makeXHRFromRequest sequence
+    let spawns' :: Sequence (MomentIO (Maybe (Banana.Event (XHRResponse body), XMLHttpRequest)))
+        spawns' = maybe (return Nothing) (fmap Just) <$> spawns
+    responseSequence :: Sequence (Maybe (Banana.Event (XHRResponse body)))
+        <- (fmap . fmap . fmap) fst (sequenceCommute spawns')
+    let responseSequence' :: Sequence (Banana.Event (XHRResponse body))
+        responseSequence' = maybe never id <$> responseSequence
+    responses :: Banana.Event (Maybe (EitherBoth () (XHRResponse body)))
+        <- (fmap . fmap) (Just . OneRight) (sequenceSwitch responseSequence')
+    let unioner left right = case (left, right) of
+            (Just (OneLeft x), Just (OneRight y)) -> Just (Both x y)
+            (Nothing, r) -> r
+            (l, Nothing) -> l
+    return $ sequenceUnion' unioner pendings responses
+
+makeXHRFromRequest :: FromJSString body => XHRRequest -> MomentIO (Banana.Event (XHRResponse body), XMLHttpRequest)
+makeXHRFromRequest xhrRequest = do
+    xhrObject <- newXMLHttpRequest
+    open xhrObject (show (xhrRequestMethod xhrRequest))
+                   (xhrRequestURL xhrRequest)
+                   (Just True) -- True meaning do not block
+                   (Nothing :: Maybe JSString)
+                   (Nothing :: Maybe JSString)
+    forM_ (xhrRequestHeaders xhrRequest) (uncurry (setRequestHeader xhrObject))
+    -- Seems we must actually write out the concurrency here in Haskell. Even
+    -- though our XHR is asynchronous, it blocks a Haskell thread.
+    thread <- case xhrRequestBody xhrRequest of
+        Nothing -> liftIO (async (send xhrObject))
+        Just str -> liftIO (async (sendString xhrObject str))
+    (ev, fire) <- newEvent
+    liftIO $ on xhrObject readyStateChange $ do
+                 readyState <- getReadyState xhrObject
+                 if readyState /= 4
+                 then return ()
+                 else do status <- getStatus xhrObject
+                         responseText <- getResponseText xhrObject
+                         liftIO $ fire (XHRResponse (fromIntegral status) responseText)
+    return (ev, xhrObject)
+
+type XHRAbort = Unique
+type XHRPending = Unique
+
+xhrResponses :: Banana.Event (EitherBoth XHRPending t) -> Banana.Event t 
+xhrResponses = filterJust . fmap (bifoldl (const) (const Just) Nothing)
+
+{-
 -- | Input: either abort an existing request or start a new request.
 --   Output: a pending request, which can be fed back in to abort it, or
 --   a response.
-xhr
+xhr'
     :: EventTransformer (EitherBoth XHRAbort XHRRequest)
                         (EitherBoth XHRPending XHRResponse)
-xhr = Kleisli $ \ev -> do
+xhr' = Kleisli $ \ev -> do
 
           xhrs :: IORef (M.Map Unique XMLHttpRequest) <- liftIO $ newIORef M.empty
 
@@ -165,26 +235,4 @@ spawnXHR ref req = do
     liftIO $ modifyIORef ref (M.insert u xhr)
     return (u, ev)
 
-makeXHRFromRequest :: XHRRequest -> MomentIO (Banana.Event XHRResponse, XMLHttpRequest)
-makeXHRFromRequest xhrRequest = do
-    xhrObject <- newXMLHttpRequest
-    open xhrObject (show (xhrRequestMethod xhrRequest))
-                   (xhrRequestURL xhrRequest)
-                   (Just True) -- True meaning do not block
-                   (Nothing :: Maybe JSString)
-                   (Nothing :: Maybe JSString)
-    forM_ (xhrRequestHeaders xhrRequest) (uncurry (setRequestHeader xhrObject))
-    -- Seems we must actually write out the concurrency here in Haskell. Even
-    -- though our XHR is asynchronous, it blocks a Haskell thread.
-    thread <- case xhrRequestBody xhrRequest of
-        Nothing -> liftIO (async (send xhrObject))
-        Just str -> liftIO (async (sendString xhrObject str))
-    (ev, fire) <- newEvent
-    liftIO $ on xhrObject readyStateChange $ do
-                 readyState <- getReadyState xhrObject
-                 if readyState /= 4
-                 then return ()
-                 else do status <- getStatus xhrObject
-                         responseText <- getResponseText xhrObject
-                         liftIO $ fire (XHRResponse (fromIntegral status) responseText)
-    return (ev, xhrObject)
+-}
