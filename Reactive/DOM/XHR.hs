@@ -99,29 +99,35 @@ xhr = Kleisli $ \ev -> do
 xhr
     :: forall body .
        FromJSString body
-    => Kleisli MomentIO
-               (Sequence (Maybe XHRRequest)) 
-               (Sequence (Maybe (EitherBoth () (XHRResponse body))))
-xhr = Kleisli $ \sequence -> do
-    -- Every non-Nothing hit of the sequence means there's a pending request.
-    let pendings :: Sequence (Maybe (EitherBoth () (XHRResponse body)))
+    => Sequence (Maybe XHRRequest)
+    -> Sequence (Maybe (EitherBoth () (XHRResponse body)))
+xhr = \sequence -> 
+    let -- Every non-Nothing hit of the sequence means there's a pending request.
+        pendings :: Sequence (Maybe (EitherBoth () (XHRResponse body)))
         pendings = (fmap . fmap) (const (OneLeft ())) sequence
-    -- Every non-Nothing hit of the sequence also spawns a request.
-    let spawns :: Sequence (Maybe (MomentIO (Banana.Event (XHRResponse body), XMLHttpRequest)))
+
+        -- Every non-Nothing hit of the sequence also spawns a request.
+        spawns :: Sequence (Maybe (MomentIO (Banana.Event (XHRResponse body), XMLHttpRequest)))
         spawns = (fmap . fmap) makeXHRFromRequest sequence
-    let spawns' :: Sequence (MomentIO (Maybe (Banana.Event (XHRResponse body), XMLHttpRequest)))
+
+        spawns' :: Sequence (MomentIO (Maybe (Banana.Event (XHRResponse body), XMLHttpRequest)))
         spawns' = maybe (return Nothing) (fmap Just) <$> spawns
-    responseSequence :: Sequence (Maybe (Banana.Event (XHRResponse body)))
-        <- (fmap . fmap . fmap) fst (sequenceCommute spawns')
-    let responseSequence' :: Sequence (Banana.Event (XHRResponse body))
+
+        responseSequence :: Sequence (Maybe (Banana.Event (XHRResponse body)))
+        responseSequence = (fmap . fmap) fst (sequenceCommute' spawns')
+
+        responseSequence' :: Sequence (Banana.Event (XHRResponse body))
         responseSequence' = maybe never id <$> responseSequence
-    responses :: Banana.Event (Maybe (EitherBoth () (XHRResponse body)))
-        <- (fmap . fmap) (Just . OneRight) (sequenceSwitch responseSequence')
-    let unioner left right = case (left, right) of
+
+        responses :: Sequence (Maybe (EitherBoth () (XHRResponse body)))
+        responses = (fmap . fmap) (OneRight) (sequenceSwitch' responseSequence')
+
+        unioner left right = case (left, right) of
             (Just (OneLeft x), Just (OneRight y)) -> Just (Both x y)
             (Nothing, r) -> r
             (l, Nothing) -> l
-    return $ sequenceUnion' unioner pendings responses
+
+    in  sequenceUnion unioner pendings responses
 
 makeXHRFromRequest :: FromJSString body => XHRRequest -> MomentIO (Banana.Event (XHRResponse body), XMLHttpRequest)
 makeXHRFromRequest xhrRequest = do

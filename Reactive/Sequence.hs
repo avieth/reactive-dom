@@ -11,6 +11,9 @@ Portability : non-portable (GHC only)
 {-# LANGUAGE RecursiveDo #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE DeriveFunctor #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
 module Reactive.Sequence (
 
@@ -29,9 +32,13 @@ module Reactive.Sequence (
     , sequenceUnion
     , sequenceUnion'
     , sequenceCommute
+    , sequenceCommute'
     , sequenceSwitch
+    , sequenceSwitch'
     , sequenceReactimate
     , sequenceChoice
+
+    , SequenceAlternative(..)
 
     {-
     , LiveSequence(..)
@@ -77,7 +84,10 @@ sequenceFirst :: Sequence t -> MomentIO t
 sequenceFirst (Sequence m f) = (f . fst) <$> m
 
 sequenceRest :: Sequence t -> MomentIO (Event t)
-sequenceRest (Sequence m f) = (fmap . fmap) f (join (snd <$> m))
+sequenceRest (Sequence m f) = do
+    (_, rest) <- m
+    ev <- rest
+    return (f <$> ev)
 
 sequenceOnce :: t -> Sequence t
 sequenceOnce = always
@@ -165,6 +175,8 @@ sequenceUnion unioner left right = Sequence content id
         return (unioner firstl firstr, theRest)
 
 sequenceChoice :: (Semigroup s) => Sequence s -> Sequence s -> Sequence s
+sequenceChoice left right = (<>) <$> left <*> right
+{-
 sequenceChoice left right = Sequence content id
   where
     content = do
@@ -176,6 +188,7 @@ sequenceChoice left right = Sequence content id
                 restr <- sequenceRest right
                 return (unionWith (<>) restl restr)
         return (first, theRest)
+-}
 
 instance Semigroup s => Semigroup (Sequence s) where
     (<>) = sequenceChoice
@@ -183,6 +196,45 @@ instance Semigroup s => Semigroup (Sequence s) where
 instance (Semigroup s, Monoid s) => Monoid (Sequence s) where
     mempty = always mempty
     mappend = (<>)
+
+sequenceLatest
+    :: forall s .
+       ( )
+    => (s -> s -> s)
+    -> Sequence s
+    -> Sequence s
+    -> Sequence s
+sequenceLatest disambiguator left right = Sequence content id
+  where
+    content :: MomentIO (s, MomentIO (Event s))
+    content = do
+        firstl :: s <- sequenceFirst left
+        firstr :: s <- sequenceFirst right
+        let first :: s
+            first = disambiguator firstl firstr
+        let rest :: MomentIO (Event s)
+            rest = do restl <- sequenceRest left
+                      restr <- sequenceRest right
+                      pure (unionWith disambiguator restl restr)
+        return (first, rest)
+
+newtype SequenceAlternative s t = SequenceAlternative {
+      runSequenceAlternative :: Sequence (s t)
+    }
+
+deriving instance Functor s => Functor (SequenceAlternative s)
+
+instance Applicative s => Applicative (SequenceAlternative s) where
+    pure = SequenceAlternative . pure . pure
+    left <*> right = SequenceAlternative $
+        (<*>) <$> (runSequenceAlternative left) <*> (runSequenceAlternative right)
+
+instance Alternative s => Alternative (SequenceAlternative s) where
+    empty = SequenceAlternative (always empty)
+    left <|> right = SequenceAlternative $
+        sequenceLatest (<|>)
+                       (runSequenceAlternative left)
+                       (runSequenceAlternative right)
 
 sequenceUnion' :: (s -> s -> s) -> Sequence s -> Event s -> Sequence s
 sequenceUnion' unioner left right = Sequence content id
@@ -193,73 +245,57 @@ sequenceUnion' unioner left right = Sequence content id
         let theRest = return (unionWith unioner restl right)
         return (firstl, theRest)
 
--- | Commute Sequence and MomentIO.
+-- | We're careful to ensure that each MomentIO is executed at most once, so
+--   that derived sequences don't recompute these terms.
 sequenceCommute :: Sequence (MomentIO t) -> MomentIO (Sequence t)
 sequenceCommute sequence = do
-    let content = do first <- sequenceFirst sequence
-                     first' <- first
-                     let theRest = do rest <- sequenceRest sequence
-                                      execute rest
-                     return (first', theRest)
-    return (Sequence content id)
-
-{-
-sequenceExecute' :: Sequence (MomentIO t) -> Sequence t
-sequenceExecute' sequence = Sequence $ do
     first :: MomentIO t <- sequenceFirst sequence
-    rest :: Event (MomentIO t) <- sequenceRest sequence
     first' <- first
-    rest' <- execute rest
-    return (first', rest')
-
-sequenceExecute'' :: Sequence (MomentIO t) -> Sequence t
-sequenceExecute'' sequence = Sequence $ do
-    first :: MomentIO t <- sequenceFirst sequence
     rest :: Event (MomentIO t) <- sequenceRest sequence
-    first' <- first
-    rest' <- execute rest
-    rest'' <- immediatelyAfter rest'
-    return (first', rest'')
--}
+    ev :: Event t <- execute rest
+    return (Sequence (pure (first', pure ev)) id)
 
--- We've got 
---
---   MomentIO (Event t)
---   MomentIO (Event (Event t))
---
--- How can we produce MomentIO (Event t) while being maximally lazy?
--- I think we just have to force them...
---
--- What if instead we gave
---
---     Sequence (Event t) -> MomentIO (Event (MomentIO t))
---
--- ??
---
--- Imagine if
---
---     type Sequence t = forall s . (s -> t) -> (MomentIO (s, MomentIO (Event (MomentIO s))))
---
--- Then could we do sequenceSwitch more lazily?
---
---     sequenceSwitch sequence = do
---         first Event t <- sequenceFirst sequence
---         rest :: Event (MomentIO (Event t)) <- sequenceRest sequence
---         rests :: Event (Event t) <- execute rest
---         return $ unionWith const first rests
---
--- We have to force the initial, and the Event
---
--- | This will force both parts of your sequence: the initial value and
---   the subsequent event. Be careful when using this with recursive do
---   notation.
+sequenceCommute' :: forall t . Sequence (MomentIO t) -> Sequence t
+sequenceCommute' sequence = Sequence content id
+  where
+    content :: MomentIO (t, MomentIO (Event t))
+    content = do
+        s :: Sequence t <- sequenceCommute sequence
+        first <- sequenceFirst s
+        return (first, sequenceRest s)
+
+-- | This is strict. We clearly have to force both parts of the sequence
+--   before we can come up with the switched event.
 sequenceSwitch :: forall t . Sequence (Event t) -> MomentIO (Event t)
 sequenceSwitch sequence = do
-    first :: Event t <- sequenceFirst sequence
-    rest :: Event (Event t) <- sequenceRest sequence
-    let rests :: Event t
-        rests = switchE rest
-    return $ unionWith const rests first
+    -- We have to kindof jump through some hoops here, to ensure that
+    -- we don't miss the first event. This is done by making two separate
+    -- @Event t@s:
+    --
+    --   first :: Event t  from sequenceFirst sequence
+    --   rest :: Event t   from switchE <$> sequenceRest sequence
+    --
+    -- and then keeping track of which one to let pass through, by making
+    -- a Behavior Bool indicating whether the first event has been made
+    -- obsolete by an occurrence of the second.
+    e :: Event t <- sequenceFirst sequence
+    es <- sequenceRest sequence
+    esHasFired :: Behavior Bool <- stepper False (const True <$> es)
+    let first :: Event t
+        first = e
+    let rest :: Event t
+        rest = switchE es
+    return $ unionWith const 
+                       (filterApply ((const . not) <$> esHasFired) first)
+                       (filterApply (const <$> esHasFired) rest)
+
+-- | Like sequenceSwitch'' but we hide the MomentIO computation inside the
+--   Sequence, and give Nothing for the initial value.
+sequenceSwitch' :: forall t . Sequence (Event t) -> Sequence (Maybe t)
+sequenceSwitch' sequence = Sequence content id
+  where
+    content :: MomentIO (Maybe t, MomentIO (Event (Maybe t)))
+    content = return (Nothing, (fmap . fmap) Just (sequenceSwitch sequence))
 
 sequenceReactimate :: Sequence (IO ()) -> MomentIO ()
 sequenceReactimate sequence = do
@@ -268,46 +304,6 @@ sequenceReactimate sequence = do
     liftIO first
     reactimate rest
     return ()
-
--- Basically what we want here is a bundle of
---   1. An event to indicate all changes.
---   2. A behavior to indicate the previous value, at a given point when a
---      change occurs.
---   3. A behavior to indicate the latest value... so the old style should
---      suffice, no? If 
---
--- The crucial difference: the ability to ALWAYS get the VERY LATEST from
--- ANYWHERE, even if your action is indirectly induced by that very event! i.e.
--- you don't have the event's value from a reactimate or execute, because some
--- *other* reactimate or execute on that *same* event has called your action.
--- 
--- The fact that this situation can arise at all is a bit unsettling, though.
--- Perhaps a better solution is this: wait until the network has settled
--- before rendering the children.
-{-
-newtype LiveSequence t = LiveSequence (Behavior t, Event t)
-
-instance Functor LiveSequence where
-    fmap f (LiveSequence (b, e)) = LiveSequence (fmap f b, fmap f e)
-
-liveSequence :: Sequence t -> MomentIO (LiveSequence t)
-liveSequence ~(Sequence (t, ev)) = do
-    b <- stepper t ev
-    return (LiveSequence (b, ev))
-
-{-
-fromEvent :: t -> Event t -> MomentIO (LiveSequence t)
-fromEvent first ev = do
-    b <- stepper first ev
-    return (LiveSequence (b, ev))
--}
-
-sequenceCurrent :: LiveSequence t -> MomentIO t
-sequenceCurrent (LiveSequence (b, _)) = valueB b
-
-sequenceNext :: LiveSequence t -> Event t
-sequenceNext (LiveSequence (_, e)) = e
--}
 
 immediatelyAfter :: Event t -> MomentIO (Event t)
 immediatelyAfter ev = do
