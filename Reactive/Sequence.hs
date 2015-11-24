@@ -35,6 +35,7 @@ module Reactive.Sequence (
     , sequenceCommute'
     , sequenceSwitch
     , sequenceSwitch'
+    , switchSequence
     , sequenceReactimate
     , sequenceChoice
 
@@ -296,6 +297,42 @@ sequenceSwitch' sequence = Sequence content id
   where
     content :: MomentIO (Maybe t, MomentIO (Event (Maybe t)))
     content = return (Nothing, (fmap . fmap) Just (sequenceSwitch sequence))
+
+switchSequence :: forall t . (t -> t -> t) -> Sequence (Sequence t) -> Sequence t
+switchSequence disambiguator sequence = Sequence content id
+  where
+    content :: MomentIO (t, MomentIO (Event t))
+    content = do
+
+        first :: Sequence t <- sequenceFirst sequence
+        first' :: t <- sequenceFirst first
+
+        let rest' :: MomentIO (Event t)
+            rest' = do
+                rest :: Event (Sequence t) <- sequenceRest sequence
+                -- The remaining elements of the first sequence.
+                firstRest :: Event t
+                    <- sequenceRest first
+                -- The first (immediate) elements of the remaining sequences.
+                restFirst :: Event t
+                    <- execute (sequenceFirst <$> rest)
+                -- The remaining elements of the remaining sequences.
+                restRest :: Event (Event t)
+                    <- execute (sequenceRest <$> rest)
+                let switchedRest :: Event t
+                    switchedRest = switchE restRest
+                -- We want to use firstRest until restFirst has fired at least
+                -- once, at which point we union restFirst with restRest.
+                restHasFired :: Behavior Bool <- stepper False (const True <$> restFirst)
+                let remaining :: Event t
+                    remaining = unionWith disambiguator
+                                          restFirst
+                                          switchedRest
+                return $ unionWith disambiguator
+                                   (filterApply ((const . not) <$> restHasFired) firstRest)
+                                   (filterApply (const <$> restHasFired) remaining)
+
+        return (first', rest')
 
 sequenceReactimate :: Sequence (IO ()) -> MomentIO ()
 sequenceReactimate sequence = do
