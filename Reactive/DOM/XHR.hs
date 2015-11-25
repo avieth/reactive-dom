@@ -11,6 +11,9 @@ Portability : non-portable (GHC only)
 {-# LANGUAGE AutoDeriveTypeable #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE FlexibleContexts #-}
 
 module Reactive.DOM.XHR where
 
@@ -19,6 +22,7 @@ import Control.Monad (forM_)
 import Control.Monad.Trans.Reader (ask)
 import Control.Monad.IO.Class
 import Control.Concurrent.Async
+import Data.Functor.Identity
 import Data.IORef
 import Data.Unique
 import Data.Monoid
@@ -36,8 +40,6 @@ import GHCJS.DOM.EventM
 import Reactive.Banana.Combinators as Banana
 import Reactive.Banana.Frameworks
 import Reactive.Sequence
-import Reactive.Eventful
-import Reactive.EventTransformer
 
 type XHRURL = JSString
 
@@ -68,68 +70,74 @@ data XHRResponse body = XHRResponse {
     , xhrResponseBody :: Maybe body
     }
 
-{-
--- | The output type is EitherBoth because we need to indicate that a request
---   is launch and/or a response has been received. These could happen
---   simultaneously, although it's probably a very rare case.
-xhr :: FromJSString body => EventTransformer XHRRequest (EitherBoth () (XHRResponse body))
-xhr = Kleisli $ \ev -> do
-           out <- eventful $ execute (makeXHRFromRequest <$> ev)
-           let responses = switchE (fst <$> out)
-           let ev' = const (OneLeft ()) <$> ev
-           let responses' = OneRight <$> responses
-           let unioner left right = case (left, right) of
-                   (OneLeft x, OneRight y) -> Both x y
-           return $ unionWith unioner ev' responses'
--}
-
--- | We choose Sequence (Maybe XHRRequest) because this allows the user to
---   immediately spawn a request (Just request |> event) or to wait and just
---   use an event (Nothing |> event).
---
---   TODO it's annoying that users who have a proper sequence (not with its
---   type parameter wrapped in Maybe) still have to check for Nothing.
---   I suppose we could solve this by typeclassing sequence.
---
---     instance IsSequence Event
---     instance IsSequence Sequence
---
---   and have xhr give back an Event if you give an Event, a Sequence if you
---   give a Sequence.
+-- | By judiciously choosing the type parameters @f@ and @g@, you can spawn
+--   an XHR immediately (@f ~ Identity@).
 xhr
-    :: forall body .
-       FromJSString body
-    => Sequence (Maybe XHRRequest)
-    -> Sequence (Maybe (EitherBoth () (XHRResponse body)))
-xhr = \sequence -> 
-    let -- Every non-Nothing hit of the sequence means there's a pending request.
-        pendings :: Sequence (Maybe (EitherBoth () (XHRResponse body)))
-        pendings = (fmap . fmap) (const (OneLeft ())) sequence
+    :: forall f g body .
+       ( FromJSString body
+       ,   SwitchesTo (Sequence f g (SEvent (XHRResponse body)))
+         ~ SEvent (XHRResponse body)
+         -- The above should always be true.
+       , Switchable f (Const ()) g Identity
+       , Unionable f (Const ()) g Identity
+       )
+    => (forall s . f (MomentIO s) -> MomentIO (f s))
+    -> (forall s . g (MomentIO s) -> MomentIO (g s))
+    -> Sequence f g XHRRequest
+    -> (UnionsTo (Sequence f g) SEvent) (EitherBoth () (XHRResponse body))
+xhr commuteF commuteG sequence =
+    let -- Every time the sequence changes it means to make a request.
+        -- We derive @pendings@ so that a OneLeft or Both means that a request
+        -- was made.
+        -- TODO would be nice to give a token instead of () so that the program
+        -- could use it to cancel an in-flight request.
+        pendings :: Sequence f g (EitherBoth () (XHRResponse body))
+        pendings = (const (OneLeft ())) <$> sequence
 
-        -- Every non-Nothing hit of the sequence also spawns a request.
-        spawns :: Sequence (Maybe (MomentIO (Banana.Event (XHRResponse body), XMLHttpRequest)))
-        spawns = (fmap . fmap) makeXHRFromRequest sequence
+        -- Every non-Nothing hit of the sequence spawns a request.
+        spawns :: Sequence f g (MomentIO (SEvent (XHRResponse body), XMLHttpRequest))
+        spawns = makeXHRFromRequest <$> sequence
 
-        spawns' :: Sequence (MomentIO (Maybe (Banana.Event (XHRResponse body), XMLHttpRequest)))
-        spawns' = maybe (return Nothing) (fmap Just) <$> spawns
+        -- We commute the @spawns@ sequence and discard the XHR, since we don't
+        -- offer a way to cancel at present.
+        responseSequence :: Sequence f g (SEvent (XHRResponse body))
+        responseSequence = fst <$> sequenceCommute' commuteF commuteG spawns
 
-        responseSequence :: Sequence (Maybe (Banana.Event (XHRResponse body)))
-        responseSequence = (fmap . fmap) fst (sequenceCommute' spawns')
+        -- Now to recover our responses. We switch the @responseSequence@,
+        -- and we're careful to disambiguate by choosing *later* responses,
+        -- as that's the nature of this function: if you make a new request
+        -- while another is in flight, you will never hear the response of the
+        -- old one.
+        switched :: SEvent (XHRResponse body)
+        switched = switch (flip const) responseSequence
 
-        responseSequence' :: Sequence (Banana.Event (XHRResponse body))
-        responseSequence' = maybe never id <$> responseSequence
-
-        responses :: Sequence (Maybe (EitherBoth () (XHRResponse body)))
-        responses = (fmap . fmap) (OneRight) (sequenceSwitch' responseSequence')
+        responses :: SEvent (EitherBoth () (XHRResponse body))
+        responses = fmap OneRight switched
 
         unioner left right = case (left, right) of
-            (Just (OneLeft x), Just (OneRight y)) -> Just (Both x y)
-            (Nothing, r) -> r
-            (l, Nothing) -> l
+            (OneLeft x, OneRight y) -> (Both x y)
+            -- Other cases are in fact impossible.
 
-    in  sequenceUnion unioner pendings responses
+    in  sequenceUnion' unioner pendings responses
 
-makeXHRFromRequest :: FromJSString body => XHRRequest -> MomentIO (Banana.Event (XHRResponse body), XMLHttpRequest)
+-- Some tests to check that the types are computed well.
+-- If you give an SBehavior as input, you get an SBehavior as output
+-- (immediately there is a "request in flight" event (OneLeft ()))
+-- If you give an SEvent as input, you get an SEvent as output.
+test1 :: SBehavior (EitherBoth () (XHRResponse JSString))
+test1 = let q = undefined :: SBehavior XHRRequest
+        in  xhr (fmap Identity . runIdentity) (fmap Identity . runIdentity) q
+
+test2 :: SEvent (EitherBoth () (XHRResponse JSString))
+test2 = let q = undefined :: SEvent XHRRequest
+        in  xhr (const (pure (Const ()))) (fmap Identity . runIdentity) q
+
+-- | Make and send an XHR. You get the event giving the response, and the
+--   XHR itself, in case perhaps you want to cancel it or something.
+makeXHRFromRequest
+    :: FromJSString body
+    => XHRRequest
+    -> MomentIO (SEvent (XHRResponse body), XMLHttpRequest)
 makeXHRFromRequest xhrRequest = do
     xhrObject <- newXMLHttpRequest
     open xhrObject (show (xhrRequestMethod xhrRequest))
@@ -144,6 +152,7 @@ makeXHRFromRequest xhrRequest = do
         Nothing -> liftIO (async (send xhrObject))
         Just str -> liftIO (async (sendString xhrObject str))
     (ev, fire) <- newEvent
+    -- When the state changes to 4, we build an XHRResponse and fire the event.
     liftIO $ on xhrObject readyStateChange $ do
                  readyState <- getReadyState xhrObject
                  if readyState /= 4
@@ -151,94 +160,4 @@ makeXHRFromRequest xhrRequest = do
                  else do status <- getStatus xhrObject
                          responseText <- getResponseText xhrObject
                          liftIO $ fire (XHRResponse (fromIntegral status) responseText)
-    return (ev, xhrObject)
-
-type XHRAbort = Unique
-type XHRPending = Unique
-
-xhrResponses :: Banana.Event (EitherBoth XHRPending t) -> Banana.Event t 
-xhrResponses = filterJust . fmap (bifoldl (const) (const Just) Nothing)
-
-{-
--- | Input: either abort an existing request or start a new request.
---   Output: a pending request, which can be fed back in to abort it, or
---   a response.
-xhr'
-    :: EventTransformer (EitherBoth XHRAbort XHRRequest)
-                        (EitherBoth XHRPending XHRResponse)
-xhr' = Kleisli $ \ev -> do
-
-          xhrs :: IORef (M.Map Unique XMLHttpRequest) <- liftIO $ newIORef M.empty
-
-          -- When an event comes in, we get either
-          --     () in case it was an abort.
-          --     immediately a Unique indifying the new request, and an event
-          --         with this request's response.
-          --     or both in case it was both.
-          let req :: EitherBoth XHRAbort XHRRequest -> MomentIO (EitherBoth () (Unique, Banana.Event XHRResponse))
-              req = bitraverse (cancelXHR xhrs) (spawnXHR xhrs)
-          out :: Banana.Event (EitherBoth () (Unique, Banana.Event XHRResponse))
-              <- eventful $ execute (req <$> ev)
-
-          -- Now we use the event @out@ to produce something of type
-          -- 
-          --     Event (EitherBoth XHRPending XHRResponse)
-          --
-          -- This is obtained by discarding the ()'s to get
-          --
-          --     Event (Unique, Banana.Event XHRResponse)
-          --
-          -- splitting this into two distinct events, switching the second,
-          -- and then unioning into an EitherBoth.
-          let pickSecond :: EitherBoth s t -> Maybe t
-              pickSecond e = case e of
-                  OneLeft _ -> Nothing
-                  OneRight x -> Just x
-                  Both _ x -> Just x
-
-          let filtered :: Banana.Event (Unique, Banana.Event XHRResponse)
-              filtered = filterJust (pickSecond <$> out)
-
-          let responses :: Banana.Event XHRResponse
-              responses = switchE (snd <$> filtered)
-
-          let pendings :: Banana.Event Unique
-              pendings = fst <$> filtered
-
-          let unioner
-                  :: EitherBoth a b
-                  -> EitherBoth a b
-                  -> EitherBoth a b
-              unioner l r = case (l, r) of
-                  (OneLeft l', OneRight r') -> Both l' r'
-                  -- Impossible. Notice the use of unioner: left argument is
-                  -- always OneLeft, second is always OneRight.
-                  -- Wish I didn't have to give a partial function, but since
-                  -- unionWith is very strict in its type parameters, I'm out
-                  -- of options.
-                  _ -> undefined
-
-          let boths :: Banana.Event (EitherBoth Unique XHRResponse)
-              boths = unionWith unioner (OneLeft <$> pendings) (OneRight <$> responses)
-
-          return boths
-
-cancelXHR :: IORef (M.Map Unique XMLHttpRequest) -> XHRAbort -> MomentIO ()
-cancelXHR ref unique = do
-    m <- liftIO $ readIORef ref
-    case M.lookup unique m of
-        Nothing -> return ()
-        Just xhr -> do XHR.abort xhr
-                       liftIO $ writeIORef ref (M.delete unique m)
-
-spawnXHR
-    :: IORef (M.Map Unique XMLHttpRequest)
-    -> XHRRequest
-    -> MomentIO (Unique, Banana.Event XHRResponse)
-spawnXHR ref req = do
-    u <- liftIO newUnique
-    (ev, xhr) <- makeXHRFromRequest req
-    liftIO $ modifyIORef ref (M.insert u xhr)
-    return (u, ev)
-
--}
+    return (eventToSEvent ev, xhrObject)

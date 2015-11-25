@@ -17,6 +17,7 @@ Portability : non-portable (GHC only)
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE FlexibleContexts #-}
 
 module Reactive.DOM.Node where
 
@@ -91,10 +92,10 @@ eval (Eval x f) = f x
 data VirtualElement (m :: * -> *) = VirtualElement {
       virtualElementUnique :: Unique
     , virtualElementTag :: m JSString
-    , virtualElementProperties :: m (Sequence Properties)
-    , virtualElementAttributes :: m (Sequence Attributes)
-    , virtualElementStyle :: m (Sequence Style)
-    , virtualElementChildren :: m (Sequence [MomentIO (VirtualNode m)])
+    , virtualElementProperties :: m (SBehavior Properties)
+    , virtualElementAttributes :: m (SBehavior  Attributes)
+    , virtualElementStyle :: m (SBehavior Style)
+    , virtualElementChildren :: m (SBehavior [MomentIO (VirtualNode m)])
     , virtualElementEvents :: IORef VirtualElementEvents
     , virtualElementReactimates :: IORef VirtualElementReactimates
     }
@@ -104,6 +105,22 @@ instance Eq (VirtualElement m) where
 
 instance Ord (VirtualElement m) where
     x `compare` y = virtualElementUnique x `compare` virtualElementUnique y
+
+velemMergeStyle
+    :: forall f g m .
+       ( Functor m
+       , UnionsTo (Sequence f g) (SBehavior) ~ SBehavior
+       , Unionable f Identity g Identity
+       )
+    => Sequence f g Style
+    -> VirtualElement m
+    -> VirtualElement m
+velemMergeStyle seq velem = velem {
+      virtualElementStyle = mergeStyle seq <$> virtualElementStyle velem
+    }
+  where
+    mergeStyle :: Sequence f g Style -> SBehavior Style -> SBehavior Style
+    mergeStyle left right = left <||> right
 
 type VirtualText m = m JSString
 
@@ -189,10 +206,10 @@ renderedNode = either (toNode . renderedVirtualElement) (toNode . renderedTextNo
 virtualElement
     :: ( Applicative m )
     => m JSString
-    -> m (Sequence Properties)
-    -> m (Sequence Attributes)
-    -> m (Sequence Style)
-    -> m (Sequence [MomentIO (VirtualNode m)])
+    -> m (SBehavior Properties)
+    -> m (SBehavior Attributes)
+    -> m (SBehavior Style)
+    -> m (SBehavior [MomentIO (VirtualNode m)])
     -> MomentIO (VirtualElement m)
 virtualElement tagName props attrs style kids = do
     unique <- liftIO $ newUnique
@@ -282,15 +299,15 @@ reactimateChildren
        )
     => document
     -> parent
-    -> Sequence [MomentIO (VirtualNode Identity)]
+    -> SBehavior [MomentIO (VirtualNode Identity)]
     -> MomentIO ()
 reactimateChildren document parent children = do
     first <- sequenceFirst children
-    rendered <- forM first ((=<<) (renderVirtualNode document))
+    rendered <- forM (runIdentity first) ((=<<) (renderVirtualNode document))
     forM_ rendered (appendChild parent . Just . renderedNode)
     currentlyRendered <- liftIO $ newIORef rendered
     ev <- sequenceRest children
-    ev' <- immediatelyAfter ev
+    ev' <- immediatelyAfter (runIdentity <$> ev)
     execute (update parent currentlyRendered <$> ev')
     return ()
   where
@@ -329,11 +346,11 @@ setJSProperty el x y = js_setJSProperty el x (maybeToNullable y)
 removeJSProperty :: Element -> JSString -> IO (Maybe JSString)
 removeJSProperty el x = nullableToMaybe <$> js_removeJSProperty el x
 
-reactimateProperties :: Element -> Sequence Properties -> MomentIO ()
+reactimateProperties :: Element -> SBehavior Properties -> MomentIO ()
 reactimateProperties element sequence = do
     first <- sequenceFirst sequence
-    liftIO $ addProperties element first
-    currentProperties <- liftIO $ newIORef first
+    liftIO $ addProperties element (runIdentity first)
+    currentProperties <- liftIO $ newIORef (runIdentity first)
     let changeProperties new = do
             current <- readIORef currentProperties
             let (add, remove) = diffProperties current new
@@ -341,7 +358,7 @@ reactimateProperties element sequence = do
             addProperties element add
             writeIORef currentProperties new
     ev <- sequenceRest sequence
-    reactimate (changeProperties <$> ev)
+    reactimate (changeProperties . runIdentity <$> ev)
     return ()
 
 addProperties :: Element -> M.Map JSString JSString -> IO ()
@@ -363,11 +380,11 @@ diffProperties old new = (toAdd, toRemove)
     toRemove = M.differenceWith justWhenDifferent old new
     justWhenDifferent x y = if x /= y then Just x else Nothing
 
-reactimateStyle :: Element -> Sequence Style -> MomentIO ()
+reactimateStyle :: Element -> SBehavior Style -> MomentIO ()
 reactimateStyle element sequence = do
     first <- sequenceFirst sequence
-    liftIO $ addStyle element first
-    currentStyle <- liftIO $ newIORef first
+    liftIO $ addStyle element (runIdentity first)
+    currentStyle <- liftIO $ newIORef (runIdentity first)
     let changeStyle new = do
             current <- readIORef currentStyle
             let (add, remove) = diffStyle current new
@@ -375,7 +392,7 @@ reactimateStyle element sequence = do
             addStyle element add
             writeIORef currentStyle new
     ev <- sequenceRest sequence
-    reactimate (changeStyle <$> ev)
+    reactimate (changeStyle . runIdentity <$> ev)
     return ()
 
 addStyle :: Element -> M.Map JSString JSString -> IO ()
@@ -403,11 +420,11 @@ diffStyle oldStyle newStyle = (toAdd, toRemove)
     toRemove = M.differenceWith justWhenDifferent oldStyle newStyle
     justWhenDifferent x y = if x /= y then Just x else Nothing
 
-reactimateAttributes :: Element -> Sequence Attributes -> MomentIO ()
+reactimateAttributes :: Element -> SBehavior Attributes -> MomentIO ()
 reactimateAttributes element sequence = do
     first <- sequenceFirst sequence
-    liftIO $ addAttributes element first
-    currentAttributes <- liftIO $ newIORef first
+    liftIO $ addAttributes element (runIdentity first)
+    currentAttributes <- liftIO $ newIORef (runIdentity first)
     let changeAttributes new = do
             current <- readIORef currentAttributes
             let (add, remove) = diffAttributes current new
@@ -415,7 +432,7 @@ reactimateAttributes element sequence = do
             addAttributes element add
             writeIORef currentAttributes new
     ev <- sequenceRest sequence
-    reactimate (changeAttributes <$> ev)
+    reactimate (changeAttributes . runIdentity <$> ev)
     return ()
 
 addAttributes :: Element -> M.Map JSString JSString -> IO ()
