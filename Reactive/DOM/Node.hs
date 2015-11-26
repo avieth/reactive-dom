@@ -255,7 +255,7 @@ virtualEvent
     => VirtualElement m
     -> EventName Element event
     -> (Element -> event -> IO t)
-    -> MomentIO (Event t)
+    -> MomentIO (SEvent t)
 virtualEvent velem (EventName eventName) io = do
     events <- liftIO $ readIORef (virtualElementEvents velem)
     case M.lookup eventName events of
@@ -266,7 +266,7 @@ virtualEvent velem (EventName eventName) io = do
                       let nextEvents :: VirtualElementEvents
                           nextEvents = M.insert eventName (VirtualEvent ev io fire) events
                       liftIO $ writeIORef (virtualElementEvents velem) nextEvents
-                      return ev
+                      return (eventToSEvent ev)
 
 wireVirtualReactimates
     :: ( )
