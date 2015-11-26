@@ -84,8 +84,8 @@ xhr
     => (forall s . f (MomentIO s) -> MomentIO (f s))
     -> (forall s . g (MomentIO s) -> MomentIO (g s))
     -> Sequence f g XHRRequest
-    -> (UnionsTo (Sequence f g) SEvent) (EitherBoth () (XHRResponse body))
-xhr commuteF commuteG sequence =
+    -> MomentIO ((UnionsTo (Sequence f g) SEvent) (EitherBoth () (XHRResponse body)))
+xhr commuteF commuteG sequence = do
     let -- Every time the sequence changes it means to make a request.
         -- We derive @pendings@ so that a OneLeft or Both means that a request
         -- was made.
@@ -94,41 +94,41 @@ xhr commuteF commuteG sequence =
         pendings :: Sequence f g (EitherBoth () (XHRResponse body))
         pendings = (const (OneLeft ())) <$> sequence
 
-        -- Every non-Nothing hit of the sequence spawns a request.
+    let -- Every non-Nothing hit of the sequence spawns a request.
         spawns :: Sequence f g (MomentIO (SEvent (XHRResponse body), XMLHttpRequest))
         spawns = makeXHRFromRequest <$> sequence
 
-        -- We commute the @spawns@ sequence and discard the XHR, since we don't
-        -- offer a way to cancel at present.
-        responseSequence :: Sequence f g (SEvent (XHRResponse body))
-        responseSequence = fst <$> sequenceCommute' commuteF commuteG spawns
+    -- We commute the @spawns@ sequence and discard the XHR, since we don't
+    -- offer a way to cancel at present.
+    responseSequence :: Sequence f g (SEvent (XHRResponse body))
+        <- (fmap . fmap) fst (sequenceCommute commuteF commuteG spawns)
 
-        -- Now to recover our responses. We switch the @responseSequence@,
-        -- and we're careful to disambiguate by choosing *later* responses,
-        -- as that's the nature of this function: if you make a new request
-        -- while another is in flight, you will never hear the response of the
-        -- old one.
-        switched :: SEvent (XHRResponse body)
-        switched = switch (flip const) responseSequence
+    -- Now to recover our responses. We switch the @responseSequence@,
+    -- and we're careful to disambiguate by choosing *later* responses,
+    -- as that's the nature of this function: if you make a new request
+    -- while another is in flight, you will never hear the response of the
+    -- old one.
+    switched :: SEvent (XHRResponse body)
+        <- switch (flip const) responseSequence
 
-        responses :: SEvent (EitherBoth () (XHRResponse body))
-        responses = fmap OneRight switched
+    let responses :: SEvent (EitherBoth () (XHRResponse body))
+        responses = OneRight <$> switched
 
-        unioner left right = case (left, right) of
+    let unioner left right = case (left, right) of
             (OneLeft x, OneRight y) -> (Both x y)
             -- Other cases are in fact impossible.
 
-    in  sequenceUnion' unioner pendings responses
+    pure (sequenceUnion' unioner pendings responses)
 
 -- Some tests to check that the types are computed well.
 -- If you give an SBehavior as input, you get an SBehavior as output
 -- (immediately there is a "request in flight" event (OneLeft ()))
 -- If you give an SEvent as input, you get an SEvent as output.
-test1 :: SBehavior (EitherBoth () (XHRResponse JSString))
+test1 :: MomentIO (SBehavior (EitherBoth () (XHRResponse JSString)))
 test1 = let q = undefined :: SBehavior XHRRequest
         in  xhr (fmap Identity . runIdentity) (fmap Identity . runIdentity) q
 
-test2 :: SEvent (EitherBoth () (XHRResponse JSString))
+test2 :: MomentIO (SEvent (EitherBoth () (XHRResponse JSString)))
 test2 = let q = undefined :: SEvent XHRRequest
         in  xhr (const (pure (Const ()))) (fmap Identity . runIdentity) q
 
