@@ -3,7 +3,7 @@
 Definitions in this project help the programmer to wire up a reactive DOM user
 interface via reactive-banana and ghcjs-dom.
 
-This is *experimental* software, but it's also *working* software, subject
+This is **experimental** software, but it's also **working** software, subject
 to one restriction: there is an
 [issue](https://github.com/ghcjs/shims/pull/25#issuecomment-154876738)
 with weak references in GHCJS, but it is resolved in
@@ -50,17 +50,17 @@ That's pretty dull. All of the cool Haskell magic is hidden away and all you
 see here is reactive-banana and ghcjs-dom boilerplate. If you're curious, then
 dive in using the following roadmap.
 
-## Reactive.DOM.Node
+## `Reactive.DOM.Node`
 
 In this module we define the `VirtualElement`. It takes `SBehavior`s (see
 [reactive-sequence](https://www.github.com/avieth/reactive-sequence)) of
-properties, attributes, style, and children, and when its rendered to the
+properties, attributes, style, and children, and when it's rendered to the
 DOM, reacts to changes in these. `SEvent`s can also be pulled from these
 `VirtualElement`s, such that actual DOM events from every rendering of the
 same `VirtualElement` will all be routed to this one `SEvent`. These are
 the elements from which `Component`s are built.
 
-## Reactive.DOM.Component
+## `Reactive.DOM.Component`
 
 Working directly with `VirtualElement`s is not fun. It's error-prone, and
 quickly devolves into a mess of events and behaviors and recursive-do trip-ups.
@@ -80,7 +80,7 @@ a problem for the label:
 
 ```Haskell
 -- Give JSStrings, get JSStrings. This means you can control the text by
--- choosing an appropriate sequence, and respond to the text by taking the
+-- choosing an appropriate sequence, and respond to the tiext by taking the
 -- output.
 type Label = Simple (SBehavior JSString) (SBehavior JSString)
 
@@ -118,6 +118,10 @@ logic which describes how those components interact with one-another.
 --     for the subcomponents from outputs for those subcomponents. This
 --     recursive treatment is essential: the input for the label depends upon
 --     the outputs of the buttons, namely their click events.
+-- 
+-- Note that the :*: type is from Data.Algebraic.Product in the
+-- Algebraic package at https://github.com/avieth/algebraic and is essentially
+-- just a tuple, but more useful at the type level.
 --
 type Counter = Simultaneous () (Label :*: Button :*: Button)
 
