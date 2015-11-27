@@ -266,7 +266,7 @@ virtualEvent velem (EventName eventName) io = do
                       let nextEvents :: VirtualElementEvents
                           nextEvents = M.insert eventName (VirtualEvent ev io fire) events
                       liftIO $ writeIORef (virtualElementEvents velem) nextEvents
-                      return (eventToSEvent ev)
+                      runSequenceM (eventToSEvent ev)
 
 wireVirtualReactimates
     :: ( )
@@ -302,13 +302,18 @@ reactimateChildren
     -> SBehavior [MomentIO (VirtualNode Identity)]
     -> MomentIO ()
 reactimateChildren document parent children = do
-    first <- sequenceFirst children
-    rendered <- forM (runIdentity first) ((=<<) (renderVirtualNode document))
-    forM_ rendered (appendChild parent . Just . renderedNode)
-    currentlyRendered <- liftIO $ newIORef rendered
-    ev <- sequenceRest children
-    ev' <- immediatelyAfter (runIdentity <$> ev)
-    execute (update parent currentlyRendered <$> ev')
+    currentlyRendered <- liftIO $ newIORef []
+    runSequenceM $ do
+        -- We don't update until immediately after the children change, to
+        -- ensure that the whole subtree in there has been updated.
+        -- This has no effect on the immediate part; it's still rendered
+        -- immediately by sequenceReactimate.
+        -- Careful to choose lag' and not lag, as we do want to force the
+        -- children event.
+        delayed <- lag' children
+        sequenceCommute (fmap Identity . runIdentity)
+                        (fmap Identity . runIdentity)
+                        (update parent currentlyRendered <$> delayed)
     return ()
   where
     -- A stupid, minimally efficient diff: remove all old, add all new.
@@ -348,17 +353,16 @@ removeJSProperty el x = nullableToMaybe <$> js_removeJSProperty el x
 
 reactimateProperties :: Element -> SBehavior Properties -> MomentIO ()
 reactimateProperties element sequence = do
-    first <- sequenceFirst sequence
-    liftIO $ addProperties element (runIdentity first)
-    currentProperties <- liftIO $ newIORef (runIdentity first)
+    currentProperties <- liftIO $ newIORef mempty
     let changeProperties new = do
             current <- readIORef currentProperties
             let (add, remove) = diffProperties current new
             removeProperties element remove
             addProperties element add
             writeIORef currentProperties new
-    ev <- sequenceRest sequence
-    reactimate (changeProperties . runIdentity <$> ev)
+    runSequenceM $ sequenceReactimate runIdentity
+                                      runIdentity
+                                      (changeProperties <$> sequence)
     return ()
 
 addProperties :: Element -> M.Map JSString JSString -> IO ()
@@ -382,17 +386,16 @@ diffProperties old new = (toAdd, toRemove)
 
 reactimateStyle :: Element -> SBehavior Style -> MomentIO ()
 reactimateStyle element sequence = do
-    first <- sequenceFirst sequence
-    liftIO $ addStyle element (runIdentity first)
-    currentStyle <- liftIO $ newIORef (runIdentity first)
+    currentStyle <- liftIO $ newIORef mempty
     let changeStyle new = do
             current <- readIORef currentStyle
             let (add, remove) = diffStyle current new
             removeStyle element remove
             addStyle element add
             writeIORef currentStyle new
-    ev <- sequenceRest sequence
-    reactimate (changeStyle . runIdentity <$> ev)
+    runSequenceM $ sequenceReactimate runIdentity
+                                      runIdentity
+                                      (changeStyle <$> sequence)
     return ()
 
 addStyle :: Element -> M.Map JSString JSString -> IO ()
@@ -422,17 +425,16 @@ diffStyle oldStyle newStyle = (toAdd, toRemove)
 
 reactimateAttributes :: Element -> SBehavior Attributes -> MomentIO ()
 reactimateAttributes element sequence = do
-    first <- sequenceFirst sequence
-    liftIO $ addAttributes element (runIdentity first)
-    currentAttributes <- liftIO $ newIORef (runIdentity first)
+    currentAttributes <- liftIO $ newIORef mempty
     let changeAttributes new = do
             current <- readIORef currentAttributes
             let (add, remove) = diffAttributes current new
             removeAttributes element remove
             addAttributes element add
             writeIORef currentAttributes new
-    ev <- sequenceRest sequence
-    reactimate (changeAttributes . runIdentity <$> ev)
+    runSequenceM $ sequenceReactimate runIdentity
+                                      runIdentity
+                                      (changeAttributes <$> sequence)
     return ()
 
 addAttributes :: Element -> M.Map JSString JSString -> IO ()

@@ -36,6 +36,8 @@ import Reactive.Banana.Frameworks
 import Reactive.Sequence
 import Reactive.DOM.Node
 import GHCJS.Types (JSString)
+import GHCJS.DOM.Event (IsEvent)
+import GHCJS.DOM.EventTargetClosures (EventName)
 import qualified GHCJS.DOM.Element as Element
 import Data.Algebraic.Index
 import Data.Algebraic.Product hiding (Component)
@@ -59,7 +61,23 @@ instance Component (Simple inp out) where
     type ComponentOutput (Simple inp out) = out
     runComponent (Simple mk) inp = mk inp
 
--- | Make an SBehavior of independent components.
+data WithEvent ev t sub = WithEvent (EventName Element.Element ev)
+                                    (Element.Element -> ev -> IO t)
+                                    sub
+
+instance (IsEvent ev, Component sub) => Component (WithEvent ev t sub) where
+    type ComponentInput (WithEvent ev t sub) = ( ComponentInput sub )
+    type ComponentOutput (WithEvent ev t sub) = ( SEvent t
+                                                , ComponentOutput sub
+                                                )
+    runComponent (WithEvent ev mk sub) (subInput) = do
+        (out, velem) <- runComponent sub subInput
+        event <- virtualEvent velem ev mk
+        pure ((event, out), velem)
+
+-- | ComponentBehavior sub takes an SBehavior of the input of sub, and gives
+--   an SBehavior of its output. Whenever the input SBehavior changes, the
+--   component is recomputed, its output is emitted, and its display refreshed.
 data ComponentBehavior sub = ComponentBehavior sub
 
 instance Component sub => Component (ComponentBehavior sub) where
@@ -69,9 +87,9 @@ instance Component sub => Component (ComponentBehavior sub) where
         let components :: SBehavior (MomentIO (ComponentOutput sub, VirtualElement Identity))
             components = runComponent sub <$> sbheavior
         commuted :: SBehavior (ComponentOutput sub, VirtualElement Identity)
-            <- sequenceCommute (fmap Identity . runIdentity)
-                               (fmap Identity . runIdentity)
-                               components
+            <- runSequenceM $ sequenceCommute (fmap Identity . runIdentity)
+                                              (fmap Identity . runIdentity)
+                                              components
         let outputs :: SBehavior (ComponentOutput sub)
             outputs = fst <$> commuted
         let children :: SBehavior (VirtualElement Identity)
@@ -129,7 +147,7 @@ instance Component sub => Component (ComponentStyle sub) where
 --   need the input parameter but not the output.
 data Simultaneous inp sub where
     Simultaneous
-        :: (inp -> (ComponentOutput sub -> ComponentInput sub))
+        :: (inp -> (ComponentOutput sub -> SequenceM (ComponentInput sub)))
         -> sub
         -> Simultaneous inp sub
 
@@ -137,7 +155,7 @@ instance Component sub => Component (Simultaneous inp sub) where
     type ComponentInput (Simultaneous inp sub) = inp
     type ComponentOutput (Simultaneous inp sub) = ComponentOutput sub
     runComponent (Simultaneous makeInput cs) input = mdo
-        let inputRec = makeInput input output
+        inputRec <- runSequenceM $ makeInput input output
         subComponent <- runComponent cs inputRec
         let output = fst subComponent
         let velem = snd subComponent
@@ -224,19 +242,19 @@ instance (Component sub) => Component (Switched inp sub) where
             <- runComponent sub (makeInitial input)
 
         outputBehavior :: SBehavior (ComponentOutput sub, VirtualElement Identity)
-            <- sEventToSBehavior' initial outputEvent
+            <- runSequenceM $ sEventToSBehavior initial outputEvent
 
         outputLagged :: SBehavior (ComponentOutput sub, VirtualElement Identity)
-            <- sBehaviorLag' outputBehavior
+            <- runSequenceM $ lag outputBehavior
 
         inputEvent :: SEvent (ComponentInput sub)
-            <- switch (flip const) ((transition . fst) <$> outputLagged)
+            <- runSequenceM $ switch (flip const) ((transition . fst) <$> outputLagged)
 
         -- This must go after inputEvent, since it forces both parts of it.
         outputEvent :: SEvent (ComponentOutput sub, VirtualElement Identity)
-            <- sequenceCommute (const (pure (Const ())))
-                               (fmap Identity . runIdentity)
-                               (runComponent sub <$> inputEvent)
+            <- runSequenceM $ sequenceCommute (const (pure (Const ())))
+                                              (fmap Identity . runIdentity)
+                                              (runComponent sub <$> inputEvent)
 
         let children :: SBehavior (VirtualElement Identity)
             children = snd <$> outputBehavior
