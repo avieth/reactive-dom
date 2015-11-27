@@ -1,6 +1,6 @@
 {-|
-Module      : 
-Description : 
+Module      : Reactive.DOM.Flow
+Description : Definition of Flow for component flows.
 Copyright   : (c) Alexander Vieth, 2015
 Licence     : BSD3
 Maintainer  : aovieth@gmail.com
@@ -14,8 +14,17 @@ Portability : non-portable (GHC only)
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE RecursiveDo #-}
+{-# LANGUAGE OverloadedStrings #-}
 
-module Reactive.DOM.Flow where
+module Reactive.DOM.Flow (
+
+      Flow
+    , CompleteFlow
+    , flow
+    , runFlow
+    , flowBehavior
+
+    ) where
 
 import Prelude hiding ((.), id)
 import Control.Applicative
@@ -23,6 +32,7 @@ import Control.Category
 import Control.Arrow
 import Data.Void
 import Data.Functor.Identity
+import Data.Monoid (mempty)
 import Data.Algebraic.Index
 import Data.Algebraic.Sum
 import Data.Algebraic.Product hiding (Component)
@@ -31,10 +41,8 @@ import Reactive.Sequence
 import Reactive.DOM.Node
 import Reactive.DOM.Component
 
--- An experiement in using category/arrow to describe a UI flow.
--- This gives us nice syntax, and as far as I can tell expresses everything
--- that a switched component can.
-
+-- | A @Flow s t@ describes a sequence of components, each of which produces
+--   precisely one event which contains the input to the next.
 data Flow s t where
     FlowArr :: (s -> t) -> Flow s t
     FlowCompose :: Flow u t -> Flow s u -> Flow s t
@@ -48,6 +56,9 @@ data Flow s t where
         => component
         -> Flow s t
 
+-- | A @CompleteFlow s@ is a neverending @Flow@. Give an input @s@ and you'll
+--   have a non-stop user interface. Only this kind of @Flow@ can be run to
+--   produce a @VirtualElement@ (see @runFlow@).
 type CompleteFlow s = Flow s Void
 
 instance Category Flow where
@@ -60,6 +71,15 @@ instance Arrow Flow where
 
 instance ArrowChoice Flow where
     left = FlowLeft
+
+flow
+    :: ( Component component
+       , ComponentInput component ~ s
+       , ComponentOutput component ~ SEvent t
+       )
+    => component
+    -> Flow s t
+flow = FlowComponent
 
 -- Here's what we need.
 -- The idea is to produce the next component from a Flow.
@@ -146,10 +166,23 @@ nextComponent flow = \s -> case flow of
         let leftComponent = nextComponent left
         in  nextComponentK right leftComponent s
 
-runFlow
+flowBehavior
     :: forall s .
        Flow s Void
     -> Kleisli MomentIO s (SBehavior (VirtualElement Identity))
-runFlow flow = Kleisli $ \s -> runNextComponents (nextComponent flow s)
+flowBehavior flow = Kleisli $ \s -> runNextComponents (nextComponent flow s)
 
-
+-- | Produce a virtual element which shows a complete flow.
+runFlow
+    :: forall s .
+       Flow s Void
+    -> s
+    -> MomentIO (VirtualElement Identity)
+runFlow flow s = do
+    velems <- runKleisli (flowBehavior flow) s
+    velem <- virtualElement (pure "div")
+                            (pure (always mempty))
+                            (pure (always mempty))
+                            (pure (always mempty))
+                            (pure (pure . node <$> velems))
+    return velem
