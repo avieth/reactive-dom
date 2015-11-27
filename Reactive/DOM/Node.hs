@@ -95,7 +95,7 @@ data VirtualElement (m :: * -> *) = VirtualElement {
     , virtualElementProperties :: m (SBehavior Properties)
     , virtualElementAttributes :: m (SBehavior  Attributes)
     , virtualElementStyle :: m (SBehavior Style)
-    , virtualElementChildren :: m (SBehavior [MomentIO (VirtualNode m)])
+    , virtualElementChildren :: m (SBehavior [VirtualNode m])
     , virtualElementEvents :: IORef VirtualElementEvents
     , virtualElementReactimates :: IORef VirtualElementReactimates
     }
@@ -134,7 +134,7 @@ velemTrans trans velem = velem {
     , virtualElementProperties = trans (virtualElementProperties velem)
     , virtualElementAttributes = trans (virtualElementAttributes velem)
     , virtualElementStyle = trans (virtualElementStyle velem)
-    , virtualElementChildren = trans ((fmap . fmap . fmap . fmap) (vnodeTrans trans) (virtualElementChildren velem))
+    , virtualElementChildren = trans ((fmap . fmap . fmap) (vnodeTrans trans) (virtualElementChildren velem))
     }
 
 vtextTrans
@@ -209,7 +209,7 @@ virtualElement
     -> m (SBehavior Properties)
     -> m (SBehavior Attributes)
     -> m (SBehavior Style)
-    -> m (SBehavior [MomentIO (VirtualNode m)])
+    -> m (SBehavior [VirtualNode m])
     -> MomentIO (VirtualElement m)
 virtualElement tagName props attrs style kids = do
     unique <- liftIO $ newUnique
@@ -266,7 +266,7 @@ virtualEvent velem (EventName eventName) io = do
                       let nextEvents :: VirtualElementEvents
                           nextEvents = M.insert eventName (VirtualEvent ev io fire) events
                       liftIO $ writeIORef (virtualElementEvents velem) nextEvents
-                      runSequenceM (eventToSEvent ev)
+                      pure (eventToSEvent ev)
 
 wireVirtualReactimates
     :: ( )
@@ -299,21 +299,20 @@ reactimateChildren
        )
     => document
     -> parent
-    -> SBehavior [MomentIO (VirtualNode Identity)]
+    -> SBehavior [VirtualNode Identity]
     -> MomentIO ()
 reactimateChildren document parent children = do
     currentlyRendered <- liftIO $ newIORef []
-    runSequenceM $ do
-        -- We don't update until immediately after the children change, to
-        -- ensure that the whole subtree in there has been updated.
-        -- This has no effect on the immediate part; it's still rendered
-        -- immediately by sequenceReactimate.
-        -- Careful to choose lag' and not lag, as we do want to force the
-        -- children event.
-        delayed <- lag' children
-        sequenceCommute (fmap Identity . runIdentity)
-                        (fmap Identity . runIdentity)
-                        (update parent currentlyRendered <$> delayed)
+    -- We don't update until immediately after the children change, to
+    -- ensure that the whole subtree in there has been updated.
+    -- This has no effect on the immediate part; it's still rendered
+    -- immediately by sequenceReactimate.
+    -- Careful to choose lag' and not lag, as we do want to force the
+    -- children event.
+    let delayed = lag' children
+    sequenceExecute (fmap Identity . runIdentity)
+                    (fmap Identity . runIdentity)
+                    (update parent currentlyRendered <$> delayed)
     return ()
   where
     -- A stupid, minimally efficient diff: remove all old, add all new.
@@ -329,12 +328,12 @@ reactimateChildren document parent children = do
     update
         :: parent
         -> IORef [RenderedNode]
-        -> [MomentIO (VirtualNode Identity)]
+        -> [VirtualNode Identity]
         -> MomentIO ()
     update parent current new = do
         currentRendered <- liftIO $ readIORef current
         forM_ currentRendered (removeChild parent . Just . renderedNode)
-        newRendered <- forM new ((=<<) (renderVirtualNode document))
+        newRendered <- forM new (renderVirtualNode document)
         forM_ newRendered (appendChild parent . Just . renderedNode)
         liftIO $ writeIORef current newRendered
         return ()
@@ -360,9 +359,9 @@ reactimateProperties element sequence = do
             removeProperties element remove
             addProperties element add
             writeIORef currentProperties new
-    runSequenceM $ sequenceReactimate runIdentity
-                                      runIdentity
-                                      (changeProperties <$> sequence)
+    sequenceReactimate runIdentity
+                       runIdentity
+                       (changeProperties <$> sequence)
     return ()
 
 addProperties :: Element -> M.Map JSString JSString -> IO ()
@@ -393,9 +392,9 @@ reactimateStyle element sequence = do
             removeStyle element remove
             addStyle element add
             writeIORef currentStyle new
-    runSequenceM $ sequenceReactimate runIdentity
-                                      runIdentity
-                                      (changeStyle <$> sequence)
+    sequenceReactimate runIdentity
+                       runIdentity
+                       (changeStyle <$> sequence)
     return ()
 
 addStyle :: Element -> M.Map JSString JSString -> IO ()
@@ -432,9 +431,9 @@ reactimateAttributes element sequence = do
             removeAttributes element remove
             addAttributes element add
             writeIORef currentAttributes new
-    runSequenceM $ sequenceReactimate runIdentity
-                                      runIdentity
-                                      (changeAttributes <$> sequence)
+    sequenceReactimate runIdentity
+                       runIdentity
+                       (changeAttributes <$> sequence)
     return ()
 
 addAttributes :: Element -> M.Map JSString JSString -> IO ()

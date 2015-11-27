@@ -33,6 +33,6 @@ button = Simple makeButton
                                 (pure (always M.empty))
                                 (pure (always M.empty))
                                 (pure (always M.empty))
-                                (pure (pure . pure . text . pure <$> textSequence))
+                                (pure (pure . text . pure <$> textSequence))
         click <- virtualEvent velem Element.click (\_ _ -> return ())
         return (click, velem)

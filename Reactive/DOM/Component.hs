@@ -61,6 +61,9 @@ instance Component (Simple inp out) where
     type ComponentOutput (Simple inp out) = out
     runComponent (Simple mk) inp = mk inp
 
+-- TODO this is too coarse. There's no ADT for all different types of events,
+-- so we end up saying MouseEvent, KeyboardEvent, etc. when we should be saying
+-- Click, Keypress, etc.
 data WithEvent ev t sub = WithEvent (EventName Element.Element ev)
                                     (Element.Element -> ev -> IO t)
                                     sub
@@ -78,6 +81,14 @@ instance (IsEvent ev, Component sub) => Component (WithEvent ev t sub) where
 -- | ComponentBehavior sub takes an SBehavior of the input of sub, and gives
 --   an SBehavior of its output. Whenever the input SBehavior changes, the
 --   component is recomputed, its output is emitted, and its display refreshed.
+--
+--   This gives another way to make a reactive label: just give a nonreactive
+--   label and then use ComponentBehavior. Any advantages either way?
+--   Consider the reactive button in the same scenario. Its output is
+--   an SEvent (). If we put it into ComponentBehavior then we have to
+--   switch the output event... not really a big deal I guess.
+--   So, should a component ever take an SBehavior? I suppose only if it has
+--   a subcomponent ComponentBehavior which calls for it.
 data ComponentBehavior sub = ComponentBehavior sub
 
 instance Component sub => Component (ComponentBehavior sub) where
@@ -86,10 +97,10 @@ instance Component sub => Component (ComponentBehavior sub) where
     runComponent (ComponentBehavior sub) sbheavior = do
         let components :: SBehavior (MomentIO (ComponentOutput sub, VirtualElement Identity))
             components = runComponent sub <$> sbheavior
-        commuted :: SBehavior (ComponentOutput sub, VirtualElement Identity)
-            <- runSequenceM $ sequenceCommute (fmap Identity . runIdentity)
-                                              (fmap Identity . runIdentity)
-                                              components
+
+        let commuted = sequenceCommute (fmap Identity . runIdentity)
+                                       (fmap Identity . runIdentity)
+                                       components
         let outputs :: SBehavior (ComponentOutput sub)
             outputs = fst <$> commuted
         let children :: SBehavior (VirtualElement Identity)
@@ -98,7 +109,7 @@ instance Component sub => Component (ComponentBehavior sub) where
                                 (pure (always M.empty))
                                 (pure (always M.empty))
                                 (pure (always M.empty))
-                                (pure (pure . pure . node <$> children))
+                                (pure ((pure . node <$> children)))
         pure (outputs, velem)
 
 -- | A composite just shuffles the input and output of some other component.
@@ -147,7 +158,7 @@ instance Component sub => Component (ComponentStyle sub) where
 --   need the input parameter but not the output.
 data Simultaneous inp sub where
     Simultaneous
-        :: (inp -> (ComponentOutput sub -> SequenceM (ComponentInput sub)))
+        :: (inp -> (ComponentOutput sub -> ComponentInput sub))
         -> sub
         -> Simultaneous inp sub
 
@@ -155,7 +166,7 @@ instance Component sub => Component (Simultaneous inp sub) where
     type ComponentInput (Simultaneous inp sub) = inp
     type ComponentOutput (Simultaneous inp sub) = ComponentOutput sub
     runComponent (Simultaneous makeInput cs) input = mdo
-        inputRec <- runSequenceM $ makeInput input output
+        let inputRec = makeInput input output
         subComponent <- runComponent cs inputRec
         let output = fst subComponent
         let velem = snd subComponent
@@ -175,7 +186,7 @@ instance {-# OVERLAPS #-} (Component c, Component cs) => Component (c :*: cs) wh
                                 (pure (always M.empty))
                                 (pure (always M.empty))
                                 (pure (always M.empty))
-                                (pure (always [pure (node thisVelem), pure (node thatVelem)]))
+                                (pure (always [node thisVelem, node thatVelem]))
         return (thisOutput .*. thatOutput, velem)
 
 -- ComponentSum p, where p is a product, is a component.
@@ -241,20 +252,20 @@ instance (Component sub) => Component (Switched inp sub) where
         initial :: (ComponentOutput sub, VirtualElement Identity)
             <- runComponent sub (makeInitial input)
 
-        outputBehavior :: SBehavior (ComponentOutput sub, VirtualElement Identity)
-            <- runSequenceM $ sEventToSBehavior initial outputEvent
+        let outputBehavior :: SBehavior (ComponentOutput sub, VirtualElement Identity)
+            outputBehavior = initial |> outputEvent
 
-        outputLagged :: SBehavior (ComponentOutput sub, VirtualElement Identity)
-            <- runSequenceM $ lag outputBehavior
+        let outputLagged :: SBehavior (ComponentOutput sub, VirtualElement Identity)
+            outputLagged = lag outputBehavior
 
-        inputEvent :: SEvent (ComponentInput sub)
-            <- runSequenceM $ switch (flip const) ((transition . fst) <$> outputLagged)
+        let inputEvent :: SEvent (ComponentInput sub)
+            inputEvent = switch (flip const) ((transition . fst) <$> outputLagged)
 
         -- This must go after inputEvent, since it forces both parts of it.
-        outputEvent :: SEvent (ComponentOutput sub, VirtualElement Identity)
-            <- runSequenceM $ sequenceCommute (const (pure (Const ())))
-                                              (fmap Identity . runIdentity)
-                                              (runComponent sub <$> inputEvent)
+        let outputEvent :: SEvent (ComponentOutput sub, VirtualElement Identity)
+            outputEvent = sequenceCommute (const (pure (Const ())))
+                                          (fmap Identity . runIdentity)
+                                          (runComponent sub <$> inputEvent)
 
         let children :: SBehavior (VirtualElement Identity)
             children = snd <$> outputBehavior
@@ -266,6 +277,6 @@ instance (Component sub) => Component (Switched inp sub) where
                                 (pure (always M.empty))
                                 (pure (always M.empty))
                                 (pure (always M.empty))
-                                (pure (pure . pure . node <$> children))
+                                (pure (pure . node <$> children))
 
         pure (output, velem)

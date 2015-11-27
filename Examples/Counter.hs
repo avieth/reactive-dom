@@ -27,6 +27,8 @@ import GHCJS.Types (JSString)
 -- more useful at the type level.
 import Data.Algebraic.Product
 
+import Debug.Trace
+
 -- What we have in mind is a component with two buttons--increment and
 -- decrement--and a label showing the current value. This falls into the
 -- Simultaneous type. What we have here makes the following statements:
@@ -38,7 +40,7 @@ import Data.Algebraic.Product
 --     recursive treatment is essential: the input for the label depends upon
 --     the outputs of the buttons, namely their click events.
 --
-type Counter = Simultaneous () (Label :*: Button :*: Button)
+type Counter = Simultaneous () (ComponentBehavior Label :*: Button :*: Button)
 
 -- With the type given, we have bounds for our implementation.
 -- The second parameter of Simultaneous is just the implementations of the
@@ -47,30 +49,30 @@ type Counter = Simultaneous () (Label :*: Button :*: Button)
 -- routes outputs of subcomponents to inputs of subcomponents, giving rise
 -- to the desired reactive behaviour.
 counter :: Counter
-counter = Simultaneous (const wireItUp) (label .*. button .*. button)
+counter = Simultaneous (const wireItUp) (ComponentBehavior label .*. button .*. button)
   where
     -- Note the lazy pattern! That's VERY important. Without it, we'll diverge.
     wireItUp :: (SBehavior JSString :*: SEvent () :*: SEvent ())
-             -> SequenceM (SBehavior JSString :*: SBehavior JSString :*: SBehavior JSString)
-    wireItUp ~(Product (_, Product (incr, decr))) = do
+             -> (SBehavior JSString :*: SBehavior JSString :*: SBehavior JSString)
+    wireItUp ~(Product (_, Product (incr, decr))) =
         -- The label for the increment button is always "+".
         let incrLabel = always "+"
         -- Similarly, the label for the decrement button never changes from "-".
-        let decrLabel = always "-"
+            decrLabel = always "-"
         -- From the increment event (it's the output of the first button in
         -- the product) we can produce an event which increments something by
         -- one.
-        let incrEvent :: SEvent (Int -> Int)
+            incrEvent :: SEvent (Int -> Int)
             incrEvent = (const (\x -> x + 1)) <$> incr
         -- Similarly for the decrement event.
-        let decrEvent :: SEvent (Int -> Int)
+            decrEvent :: SEvent (Int -> Int)
             decrEvent = (const (\x -> x - 1)) <$> decr
         -- Here we merge the increment and decrement events. We appeal to the
         -- semigroup First to disambiguate simultaneous evnts (which probably
         -- won't ever happen, but it's good to be safe). The way we've
         -- written it here, the increment wins over the decrement in case they
         -- happen at the same time.
-        let changes :: SEvent (Int -> Int)
+            changes :: SEvent (Int -> Int)
             changes = getFirst <$> ((First <$> incrEvent) <||> (First <$> decrEvent))
         -- From changes, we can describe the sequence of counter values. We
         -- do so recursively: assume we have the Behavior for this thing,
@@ -78,10 +80,11 @@ counter = Simultaneous (const wireItUp) (label .*. button .*. button)
         -- about the difference). All we say here is that it starts at 0,
         -- and whenever changes gives us an event with (Int -> Int), apply
         -- it to the current value.
-        countBehavior :: SBehavior Int
-            <- fixSBehavior $ \sbehavior -> sEventToSBehavior 0 (($) <$> changes %> sbehavior)
+            countBehavior :: SBehavior Int
+            countBehavior = fixSBehavior $ \sbehavior ->
+                0 |> (($) <$> changes %> sbehavior)
         -- Finally, the label text is had by dumping the current value to
         -- a JSString.
-        let labelBehavior :: SBehavior JSString
+            labelBehavior :: SBehavior JSString
             labelBehavior = fromString . show <$> countBehavior
-        pure (labelBehavior .*. incrLabel .*. decrLabel)
+        in  (labelBehavior .*. incrLabel .*. decrLabel)

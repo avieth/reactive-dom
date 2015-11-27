@@ -21,16 +21,16 @@ import Reactive.DOM.Component
 import Reactive.Banana.Frameworks
 import GHCJS.Types (JSString)
 
-type Label = Simple (SBehavior JSString) (SBehavior JSString)
+type Label = Simple JSString JSString
 
 label :: Label
 label = Simple makeLabel
   where
-    makeLabel :: SBehavior JSString -> MomentIO (SBehavior JSString, VirtualElement Identity)
-    makeLabel textSequence = do
+    makeLabel :: JSString -> MomentIO (JSString, VirtualElement Identity)
+    makeLabel labelText = do
         velem <- virtualElement (pure "span")
                                 (pure (always M.empty))
                                 (pure (always M.empty))
                                 (pure (always M.empty))
-                                (pure (pure . pure . text . pure <$> textSequence))
-        return (textSequence, velem)
+                                (pure (pure . text . pure <$> always labelText))
+        return (labelText, velem)
