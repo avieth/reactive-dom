@@ -13,6 +13,8 @@ Portability : non-portable (GHC only)
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE RecursiveDo #-}
 {-# LANGUAGE OverloadedStrings #-}
 
@@ -65,6 +67,13 @@ instance Arrow Flow where
 
 instance ArrowChoice Flow where
     left = FlowLeft
+
+instance IsComponent (Flow s Void) where
+    type ComponentInputT (Flow s Void) = s
+    type ComponentOutputT (Flow s Void) = SEvent Void
+    makeComponent flow s = do
+        velem <- runKleisli (runFlow flow) s
+        pure (never, velem)
 
 flow :: Component s (SEvent t) -> Flow s t
 flow = FlowComponent
