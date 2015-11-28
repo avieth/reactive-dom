@@ -28,6 +28,7 @@ import Data.Functor.Identity
 import Data.Unique
 import qualified Data.Map as M
 import Data.IORef
+import Data.Monoid (All(..))
 import GHCJS.Types
 import GHCJS.DOM.Types hiding (Event)
 import qualified GHCJS.DOM.Types as DOM.Types
@@ -165,6 +166,12 @@ data RenderedVirtualElement = RenderedVirtualElement {
 
 renderedFrom :: RenderedVirtualElement -> VirtualElement m -> Bool
 renderedFrom x y = renderedVirtualElementUnique x == virtualElementUnique y
+
+nodeRenderedFrom :: RenderedNode -> VirtualNode Identity -> Bool
+nodeRenderedFrom x y = case (x, y) of
+    (Left x', Left y') -> renderedFrom x' y'
+    _ -> False
+
 
 data RenderedText = RenderedText {
       renderedTextString :: JSString
@@ -318,13 +325,14 @@ reactimateChildren document parent children = do
     -- A stupid, minimally efficient diff: remove all old, add all new.
     -- We do one check: if everything in the list is JavaScript equal to
     -- its counterpart in the other, we can do nothing.
-    {-
-    diff :: [VirtualElement] -> [VirtualElement] -> ([VirtualElement], [VirtualElement])
+    diff :: [RenderedNode]
+         -> [VirtualNode Identity]
+         -> ([RenderedNode], [VirtualNode Identity])
     diff old new =
-        if getAll (mconcat (All (length old == length new) : zipWith (\x y -> All (x == y)) old new))
+        if getAll (mconcat (All (length old == length new) : zipWith (\x y -> All (nodeRenderedFrom x y)) old new))
         then ([], [])
         else (old, new)
-    -}
+
     update
         :: parent
         -> IORef [RenderedNode]
@@ -332,8 +340,9 @@ reactimateChildren document parent children = do
         -> MomentIO ()
     update parent current new = do
         currentRendered <- liftIO $ readIORef current
-        forM_ currentRendered (removeChild parent . Just . renderedNode)
-        newRendered <- forM new (renderVirtualNode document)
+        let (toRemove, toAdd) = diff currentRendered new
+        forM_ toRemove (removeChild parent . Just . renderedNode)
+        newRendered <- forM toAdd  (renderVirtualNode document)
         forM_ newRendered (appendChild parent . Just . renderedNode)
         liftIO $ writeIORef current newRendered
         return ()

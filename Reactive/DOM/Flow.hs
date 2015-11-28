@@ -48,13 +48,7 @@ data Flow s t where
     FlowCompose :: Flow u t -> Flow s u -> Flow s t
     FlowFirst :: Flow s t -> Flow (s, c) (t, c)
     FlowLeft :: Flow s t -> Flow (Either s c) (Either t c)
-    FlowComponent
-        :: ( Component component
-           , ComponentInput component ~ s
-           , ComponentOutput component ~ SEvent t
-           )
-        => component
-        -> Flow s t
+    FlowComponent :: Component s (SEvent t) -> Flow s t
 
 -- | A @CompleteFlow s@ is a neverending @Flow@. Give an input @s@ and you'll
 --   have a non-stop user interface. Only this kind of @Flow@ can be run to
@@ -72,13 +66,7 @@ instance Arrow Flow where
 instance ArrowChoice Flow where
     left = FlowLeft
 
-flow
-    :: ( Component component
-       , ComponentInput component ~ s
-       , ComponentOutput component ~ SEvent t
-       )
-    => component
-    -> Flow s t
+flow :: Component s (SEvent t) -> Flow s t
 flow = FlowComponent
 
 -- Here's what we need.
@@ -89,11 +77,7 @@ flow = FlowComponent
 -- Here we bundle all the information needed to run the component.
 data NextComponent where
     FoundComponent
-        :: ( Component component
-           , ComponentInput component ~ s
-           , ComponentOutput component ~ SEvent t
-           )
-        => component
+        :: Component s (SEvent t)
         -> s
         -> (t -> NextComponent)
         -> NextComponent
@@ -176,9 +160,8 @@ flowBehavior flow = Kleisli $ \s -> runNextComponents (nextComponent flow s)
 runFlow
     :: forall s .
        Flow s Void
-    -> s
-    -> MomentIO (VirtualElement Identity)
-runFlow flow s = do
+    -> Kleisli MomentIO s (VirtualElement Identity)
+runFlow flow = Kleisli $ \s -> do
     velems <- runKleisli (flowBehavior flow) s
     velem <- virtualElement (pure "div")
                             (pure (always mempty))

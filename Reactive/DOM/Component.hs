@@ -1,6 +1,6 @@
 {-|
 Module      : Reactive.DOM.Component
-Description : Definition of components.
+Description : Definition of IsComponent, Component.
 Copyright   : (c) Alexander Vieth, 2015
 Licence     : BSD3
 Maintainer  : aovieth@gmail.com
@@ -22,12 +22,33 @@ Portability : non-portable (GHC only)
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE UndecidableInstances #-}
 
-module Reactive.DOM.Component where
+module Reactive.DOM.Component (
 
+      IsComponent(..)
+    , Component
+    , ComponentOutput
+    , componentOutput
+    , componentOutputEvents
+    , component
+    , runComponent
+    , styleComponent
+    , withEvent
+    , getEvent
+    , ComponentEvents(..)
+    , ComponentBehavior(..)
+    , ComponentProduct(..)
+    , ComponentSum(..)
+    , Knot(..)
+    , Switched(..)
+
+    ) where
+
+import GHC.TypeLits
 import Data.Void
 import Data.Proxy
 import Data.String (fromString)
 import Data.Functor.Identity
+import Data.Profunctor
 import Data.Semigroup (First(..), getFirst)
 import Data.Monoid hiding (Product, First(..), getFirst, Sum)
 import qualified Data.Map as M
@@ -44,39 +65,138 @@ import Data.Algebraic.Product hiding (Component)
 import qualified Data.Algebraic.Product as Product
 import Data.Algebraic.Sum
 
-class Component t where
-    type ComponentInput t :: *
-    type ComponentOutput t :: *
-    runComponent
+class IsComponent t where
+    type ComponentInputT t :: *
+    type ComponentOutputT t :: *
+    makeComponent
         :: t
-        -> ComponentInput t
-        -> MomentIO (ComponentOutput t, VirtualElement Identity)
+        -> ComponentInputT t
+        -> MomentIO (ComponentOutputT t, VirtualElement Identity)
 
--- | A simple component contains direct instructions on how to make a
---   virtual element and output.
-data Simple inp out = Simple (inp -> MomentIO (out, VirtualElement Identity))
+type family NewEventName (name :: Symbol) (events :: [(Symbol, *)]) :: Bool where
+    NewEventName name '[] = 'True
+    NewEventName name ( '(name, t) ': rest ) = 'False
+    NewEventName name ( '(name', t) ': rest ) = NewEventName name rest
 
-instance Component (Simple inp out) where
-    type ComponentInput (Simple inp out) = inp
-    type ComponentOutput (Simple inp out) = out
-    runComponent (Simple mk) inp = mk inp
+type family EventType (name :: Symbol) (events :: [(Symbol, *)]) :: * where
+    EventType name ( '(name, t) ': rest ) = t
+    EventType name ( '(name', t) ': rest ) = EventType name rest
 
--- TODO this is too coarse. There's no ADT for all different types of events,
--- so we end up saying MouseEvent, KeyboardEvent, etc. when we should be saying
--- Click, Keypress, etc.
-data WithEvent ev t sub = WithEvent (EventName Element.Element ev)
-                                    (Element.Element -> ev -> IO t)
-                                    sub
+class HasEvent (name :: Symbol) (events :: [(Symbol, *)]) where
+    getEvent
+        :: Proxy name
+        -> ComponentEventsOutput events
+        -> SEvent (EventType name events)
 
-instance (IsEvent ev, Component sub) => Component (WithEvent ev t sub) where
-    type ComponentInput (WithEvent ev t sub) = ( ComponentInput sub )
-    type ComponentOutput (WithEvent ev t sub) = ( SEvent t
-                                                , ComponentOutput sub
-                                                )
-    runComponent (WithEvent ev mk sub) (subInput) = do
-        (out, velem) <- runComponent sub subInput
-        event <- virtualEvent velem ev mk
-        pure ((event, out), velem)
+instance {-# OVERLAPS #-} HasEvent name ( '(name, t) ': rest ) where
+    getEvent _ (HandleEventOutput _ sevent _) = sevent
+
+instance {-# OVERLAPS #-}
+    ( HasEvent name rest
+    , EventType name rest ~ EventType name ( '(name', t) ': rest )
+    ) => HasEvent name ( '(name', t) ': rest )
+  where
+    getEvent proxy (HandleEventOutput _ _ rest) = getEvent proxy rest
+
+data ComponentEvents (events :: [(Symbol, *)]) where
+    NoEvents :: ComponentEvents '[]
+    HandleEvent
+        :: ( NewEventName symbol events ~ 'True
+           , IsEvent event
+           )
+        => Proxy symbol
+        -> EventName Element.Element event
+        -> (Element.Element -> event -> IO t)
+        -> ComponentEvents events
+        -> ComponentEvents ( '(symbol, t) ': events)
+
+-- You can wire up events whenever the events are showing in the output.
+withEvent
+    :: ( NewEventName symbol events ~ 'True
+       , IsEvent event
+       )
+    => Proxy symbol
+    -> EventName Element.Element event
+    -> (Element.Element -> event -> IO r)
+    -> ComponentEvents events
+    -> ComponentEvents ( '(symbol, r) ': events )
+withEvent = HandleEvent
+
+data ComponentEventsOutput events where
+    NoEventsOutput :: ComponentEventsOutput '[]
+    HandleEventOutput
+        :: (
+           )
+        => Proxy name
+        -> SEvent t
+        -> ComponentEventsOutput events
+        -> ComponentEventsOutput ( '(name, t) ': events )
+
+wireComponentEvents
+    :: ComponentEvents events
+    -> VirtualElement Identity
+    -> MomentIO (ComponentEventsOutput events)
+wireComponentEvents term velem = case term of
+    NoEvents -> pure NoEventsOutput
+    HandleEvent proxy eventName handler rest ->
+        HandleEventOutput proxy <$> (virtualEvent velem eventName handler)
+                                <*> (wireComponentEvents rest velem)
+
+data ComponentOutput t events = ComponentOutput {
+      componentOutput :: t
+    , componentOutputEvents :: ComponentEventsOutput events
+    }
+
+data Component s t where
+    Component
+        :: ( IsComponent component
+           )
+        => component
+        -> (s -> ComponentInputT component)
+        -> (ComponentOutput (ComponentOutputT component) events -> t)
+        -> SBehavior Style
+        -> ComponentEvents events
+        -> Component s t
+
+instance Profunctor Component where
+    dimap l r component = case component of
+        Component c f g s e -> Component c (f . l) (r . g) s e
+
+-- | This instance allows us to nest Components.
+instance IsComponent (Component s t) where
+    type ComponentInputT (Component s t) = s
+    type ComponentOutputT (Component s t) = t
+    makeComponent = runComponent
+
+component
+    :: forall (events :: [(Symbol, *)]) component .
+       ( IsComponent component
+       )
+    => component
+    -> ComponentEvents events
+    -> Component (ComponentInputT component) 
+                 (ComponentOutput (ComponentOutputT component) events)
+component c = Component c id id (always mempty)
+
+runComponent :: Component s t -> s -> MomentIO (t, VirtualElement Identity)
+runComponent (Component component inp out style events) input = do
+    (output, velem) <- makeComponent component (inp input)
+    let styledVelem = velemMergeStyle style velem
+    events' <- wireComponentEvents events velem
+    let packagedOutput = ComponentOutput output events'
+    pure (out packagedOutput, styledVelem)
+
+styleComponent
+    :: ( Bundleable f Identity g Identity
+       , BundlesTo (Sequence f g) (SBehavior) ~ SBehavior
+       )
+    => Sequence f g Style
+    -> Component s t
+    -> Component s t
+styleComponent sequence (Component c f g s es) = Component c f g s' es
+  where
+    s' :: SBehavior Style
+    s' = (<>) <$> sequence <%> s
 
 -- | ComponentBehavior sub takes an SBehavior of the input of sub, and gives
 --   an SBehavior of its output. Whenever the input SBehavior changes, the
@@ -91,17 +211,17 @@ instance (IsEvent ev, Component sub) => Component (WithEvent ev t sub) where
 --   a subcomponent ComponentBehavior which calls for it.
 data ComponentBehavior sub = ComponentBehavior sub
 
-instance Component sub => Component (ComponentBehavior sub) where
-    type ComponentInput (ComponentBehavior sub) = SBehavior (ComponentInput sub)
-    type ComponentOutput (ComponentBehavior sub) = SBehavior (ComponentOutput sub)
-    runComponent (ComponentBehavior sub) sbheavior = do
-        let components :: SBehavior (MomentIO (ComponentOutput sub, VirtualElement Identity))
-            components = runComponent sub <$> sbheavior
+instance IsComponent sub => IsComponent (ComponentBehavior sub) where
+    type ComponentInputT (ComponentBehavior sub) = SBehavior (ComponentInputT sub)
+    type ComponentOutputT (ComponentBehavior sub) = SBehavior (ComponentOutputT sub)
+    makeComponent (ComponentBehavior sub) sbheavior = do
+        let components :: SBehavior (MomentIO (ComponentOutputT sub, VirtualElement Identity))
+            components = makeComponent sub <$> sbheavior
 
         let commuted = sequenceCommute (fmap Identity . runIdentity)
                                        (fmap Identity . runIdentity)
                                        components
-        let outputs :: SBehavior (ComponentOutput sub)
+        let outputs :: SBehavior (ComponentOutputT sub)
             outputs = fst <$> commuted
         let children :: SBehavior (VirtualElement Identity)
             children = snd <$> commuted
@@ -112,165 +232,179 @@ instance Component sub => Component (ComponentBehavior sub) where
                                 (pure ((pure . node <$> children)))
         pure (outputs, velem)
 
--- | A composite just shuffles the input and output of some other component.
-data Composite inp sub out = Composite (inp -> ComponentInput sub)
-                                       (sub)
-                                       (ComponentOutput sub -> out)
+data ComponentProduct sub = ComponentProduct sub
 
-instance Component sub => Component (Composite inp sub out) where
-    type ComponentInput (Composite inp sub out) = inp
-    type ComponentOutput (Composite inp sub out) = out
-    runComponent (Composite mkInput sub mkOutput) input = do
-        subComponent <- runComponent sub (mkInput input)
-        let subOutput :: ComponentOutput sub
-            subOutput = fst subComponent
-        let subElem :: VirtualElement Identity
-            subElem = snd subComponent
-        pure (mkOutput subOutput, subElem)
-
--- | Represents the application of a sequence of styles. They're merged
---   into the subcomponent's element's existing style.
---
---   TODO similar for properties and attributes.
-data ComponentStyle sub where
-    ComponentStyle
-        -- Need these constraints so we can do velemMergeStyle
-        :: ( Unionable f Identity g Identity
-           , UnionsTo (Sequence f g) (SBehavior) ~ SBehavior
-           )
-        => (Sequence f g Style)
-        -> sub
-        -> ComponentStyle sub
-
-instance Component sub => Component (ComponentStyle sub) where
-    type ComponentInput (ComponentStyle sub) = ComponentInput sub
-    type ComponentOutput (ComponentStyle sub) = ComponentOutput sub
-    runComponent (ComponentStyle styleSequence sub) input = do
-        subComponent <- runComponent sub input
-        let velem = snd subComponent
-        let velem' = velemMergeStyle styleSequence velem
-        return (fst subComponent, velem')
-
--- | Indicates that a subcomponents input should be defined recursively from
---   its output.
---
---   TBD why do we not have an output parameter? Just seems weird that we
---   need the input parameter but not the output.
-data Simultaneous inp sub where
-    Simultaneous
-        :: (inp -> (ComponentOutput sub -> ComponentInput sub))
-        -> sub
-        -> Simultaneous inp sub
-
-instance Component sub => Component (Simultaneous inp sub) where
-    type ComponentInput (Simultaneous inp sub) = inp
-    type ComponentOutput (Simultaneous inp sub) = ComponentOutput sub
-    runComponent (Simultaneous makeInput cs) input = mdo
-        let inputRec = makeInput input output
-        subComponent <- runComponent cs inputRec
-        let output = fst subComponent
-        let velem = snd subComponent
-        return (output, velem)
-
-instance {-# OVERLAPS #-} (Component c, Component cs) => Component (c :*: cs) where
-    type ComponentInput (c :*: cs) = (ComponentInput c) :*: (ComponentInput cs)
-    type ComponentOutput (c :*: cs) = (ComponentOutput c) :*: (ComponentOutput cs)
-    runComponent (Product (c, cs)) (Product (i, is)) = do
-        thisComponent <- runComponent c i
-        thatComponent <- runComponent cs is
-        let thisOutput = fst thisComponent
-        let thatOutput = fst thatComponent
-        let thisVelem = snd thisComponent
-        let thatVelem = snd thatComponent
+instance
+    ( IsComponentProductParameter sub (IsProduct sub)
+    ) => IsComponent (ComponentProduct sub)
+  where
+    type ComponentInputT (ComponentProduct sub) = ComponentProductParameterInput sub (IsProduct sub)
+    type ComponentOutputT (ComponentProduct sub) = ComponentProductParameterOutput sub (IsProduct sub)
+    makeComponent (ComponentProduct sub) input = do
+        (output, velems) <- makeComponentProduct sub proxy input
         velem <- virtualElement (pure "div")
                                 (pure (always M.empty))
                                 (pure (always M.empty))
                                 (pure (always M.empty))
-                                (pure (always [node thisVelem, node thatVelem]))
-        return (thisOutput .*. thatOutput, velem)
+                                (pure (always (node <$> velems)))
+        pure (output, velem)
+      where
+        proxy :: Proxy (IsProduct sub)
+        proxy = Proxy
 
--- ComponentSum p, where p is a product, is a component.
+class IsComponentProductParameter product isProduct where
+    type ComponentProductParameterInput product isProduct :: *
+    type ComponentProductParameterOutput product isProduct :: *
+    makeComponentProduct
+        :: product
+        -> Proxy isProduct
+        -> ComponentProductParameterInput product isProduct
+        -> MomentIO (ComponentProductParameterOutput product isProduct, [VirtualElement Identity])
+
+instance {-# OVERLAPS #-}
+    ( IsComponent c
+    ) => IsComponentProductParameter c 'False
+  where
+    type ComponentProductParameterInput c 'False = ComponentInputT c
+    type ComponentProductParameterOutput c 'False = ComponentOutputT c
+    makeComponentProduct c _ i = do
+        (out, velem) <- makeComponent c i
+        pure (out, [velem])
+
+instance {-# OVERLAPs #-}
+    ( IsComponent c
+    , IsComponentProductParameter cs (IsProduct cs)
+    ) => IsComponentProductParameter (c :*: cs) 'True
+  where
+    type ComponentProductParameterInput (c :*: cs) 'True = (ComponentInputT c) :*: (ComponentProductParameterInput cs (IsProduct cs))
+    type ComponentProductParameterOutput (c :*: cs) 'True = (ComponentOutputT c) :*: (ComponentProductParameterOutput cs (IsProduct cs))
+    makeComponentProduct (Product (c, cs)) _ (Product (l, r)) = do
+        (outl, veleml) <- makeComponent c l
+        (outr, velemr) <- makeComponentProduct cs (Proxy :: Proxy (IsProduct cs)) r
+        pure (outl .*. outr, veleml : velemr)
+
+-- | ComponentSum p, where p is a product, is a component.
+--   It's called ComponentSum because its Component instance demands only a
+--   sum of input, producing a sum of output, but still demands a product of
+--   the components.
 data ComponentSum sub = ComponentSum sub
+
+instance
+    ( IsComponentSumParameter sub (IsProduct sub)
+    ) => IsComponent (ComponentSum sub)
+  where
+    type ComponentInputT (ComponentSum sub) = ComponentSumParameterInput sub (IsProduct sub)
+    type ComponentOutputT (ComponentSum sub) = ComponentSumParameterOutput sub (IsProduct sub)
+    makeComponent (ComponentSum sub) input = makeComponentSum sub proxy input
+      where
+        proxy :: Proxy (IsProduct sub)
+        proxy = Proxy
 
 -- An auxiliary class to circumvent type family overlap which would otherwise
 -- arise when giving instances for Component (ComponentSum sub).
-class ComponentSumParameter sum isProduct where
+class IsComponentSumParameter sum isProduct where
     type ComponentSumParameterInput sum isProduct :: *
     type ComponentSumParameterOutput sum isProduct :: *
-    runComponentSum
+    makeComponentSum
         :: sum
         -> Proxy isProduct
         -> ComponentSumParameterInput sum isProduct
         -> MomentIO (ComponentSumParameterOutput sum isProduct, VirtualElement Identity)
 
 instance {-# OVERLAPS #-}
-    ( Component c
-    ) => ComponentSumParameter c 'False
+    ( IsComponent c
+    ) => IsComponentSumParameter c 'False
   where
-    type ComponentSumParameterInput c 'False = ComponentInput c
-    type ComponentSumParameterOutput c 'False = ComponentOutput c
-    runComponentSum c _ i = runComponent c i
+    type ComponentSumParameterInput c 'False = ComponentInputT c
+    type ComponentSumParameterOutput c 'False = ComponentOutputT c
+    makeComponentSum c _ i = makeComponent c i
 
 instance {-# OVERLAPs #-}
-    ( Component c
-    , ComponentSumParameter cs (IsProduct cs)
-    ) => ComponentSumParameter (c :*: cs) 'True
+    ( IsComponent c
+    , IsComponentSumParameter cs (IsProduct cs)
+    ) => IsComponentSumParameter (c :*: cs) 'True
   where
-    type ComponentSumParameterInput (c :*: cs) 'True = (ComponentInput c) :+: (ComponentSumParameterInput cs (IsProduct cs))
-    type ComponentSumParameterOutput (c :*: cs) 'True = (ComponentOutput c) :+: (ComponentSumParameterOutput cs (IsProduct cs))
-    runComponentSum (Product (c, cs)) _ (Sum sum) = case sum of
+    type ComponentSumParameterInput (c :*: cs) 'True = (ComponentInputT c) :+: (ComponentSumParameterInput cs (IsProduct cs))
+    type ComponentSumParameterOutput (c :*: cs) 'True = (ComponentOutputT c) :+: (ComponentSumParameterOutput cs (IsProduct cs))
+    makeComponentSum (Product (c, cs)) _ (Sum sum) = case sum of
         Left i -> do
-            (out, velem) <- runComponent c i
+            (out, velem) <- makeComponent c i
             pure (Sum (Left out), velem)
         Right is -> do
-            (out, velem) <- runComponentSum cs (Proxy :: Proxy (IsProduct cs)) is
+            (out, velem) <- makeComponentSum cs (Proxy :: Proxy (IsProduct cs)) is
             pure (Sum (Right out), velem)
 
-instance
-    ( ComponentSumParameter sub (IsProduct sub)
-    ) => Component (ComponentSum sub)
-  where
-    type ComponentInput (ComponentSum sub) = ComponentSumParameterInput sub (IsProduct sub)
-    type ComponentOutput (ComponentSum sub) = ComponentSumParameterOutput sub (IsProduct sub)
-    runComponent (ComponentSum sub) input = runComponentSum sub proxy input
-      where
-        proxy :: Proxy (IsProduct sub)
-        proxy = Proxy
- 
-data Switched inp sub where
+-- | Indicates that a subcomponents input should be defined recursively from
+--   its output.
+data Knot sub where
+    Knot
+        :: sub
+        -> (ComponentOutputT sub -> ComponentInputT sub)
+        -> Knot sub
+
+instance IsComponent sub => IsComponent (Knot sub) where
+    -- No need for any information it, since output completely determines input.
+    type ComponentInputT (Knot sub) = ()
+    type ComponentOutputT (Knot sub) = (ComponentInputT sub, ComponentOutputT sub)
+    makeComponent (Knot subComponent makeInput) () = mdo
+        -- Note the recursive definition. Your makeInput function must only
+        -- use the output lazily (and be sure to use a lazy pattern).
+        let inputRec :: ComponentInputT sub
+            inputRec = makeInput output
+        subComponentOut <- makeComponent subComponent inputRec
+        let output = fst subComponentOut
+        let velem = snd subComponentOut
+        return ((inputRec, output), velem)
+
+-- | Switched components are time varying-components, which change form based
+--   on their output events. To make them you must give a transition function
+--   from the components output to an event giving input. When that event
+--   fires, the component is recomputed with that input and shown, and the
+--   transition function runs again to produce the next change event.
+--
+--   This is most interesting when sub ~ ComponentSum (p_1 :*: ... :*: p_n)
+--   in which case it will switch between multiple different components.
+--   This can express, for example, an n > 2-phase UI in which the first
+--   phase is a login screen, and the next phase is selected only when that
+--   login component determines it's ok to show it (credential challenger
+--   can be abstracted and provided at a higher level).
+--
+--
+--   SEE ALSO Reactive.DOM.Flow which defines similar functionality, but using
+--   a Category/Arrow.
+data Switched sub where
     Switched
-        :: (inp -> ComponentInput sub)
-        -> (ComponentOutput sub -> SEvent (ComponentInput sub))
-        -> sub
-        -> Switched inp sub
+        :: (ComponentOutputT sub -> SEvent (ComponentInputT sub))
+        -> (sub)
+        -> Switched sub
 
-instance (Component sub) => Component (Switched inp sub) where
-    type ComponentInput (Switched inp sub) = inp
-    type ComponentOutput (Switched inp sub) = SBehavior (ComponentOutput sub)
-    runComponent (Switched makeInitial transition sub) input = mdo
+instance (IsComponent sub) => IsComponent (Switched sub) where
+    type ComponentInputT (Switched sub) = ComponentInputT sub
+    type ComponentOutputT (Switched sub) = SBehavior (ComponentOutputT sub)
+    makeComponent (Switched transition sub) input = mdo
 
-        initial :: (ComponentOutput sub, VirtualElement Identity)
-            <- runComponent sub (makeInitial input)
+        initial :: (ComponentOutputT sub, VirtualElement Identity)
+            <- makeComponent sub input
 
-        let outputBehavior :: SBehavior (ComponentOutput sub, VirtualElement Identity)
+        let outputBehavior :: SBehavior (ComponentOutputT sub, VirtualElement Identity)
             outputBehavior = initial |> outputEvent
 
-        let outputLagged :: SBehavior (ComponentOutput sub, VirtualElement Identity)
+        let outputLagged :: SBehavior (ComponentOutputT sub, VirtualElement Identity)
             outputLagged = lag outputBehavior
 
-        let inputEvent :: SEvent (ComponentInput sub)
+        let inputEvent :: SEvent (ComponentInputT sub)
             inputEvent = switch (flip const) ((transition . fst) <$> outputLagged)
 
         -- This must go after inputEvent, since it forces both parts of it.
-        let outputEvent :: SEvent (ComponentOutput sub, VirtualElement Identity)
+        let outputEvent :: SEvent (ComponentOutputT sub, VirtualElement Identity)
             outputEvent = sequenceCommute (const (pure (Const ())))
                                           (fmap Identity . runIdentity)
-                                          (runComponent sub <$> inputEvent)
+                                          (makeComponent sub <$> inputEvent)
 
         let children :: SBehavior (VirtualElement Identity)
             children = snd <$> outputBehavior
 
-        let output :: SBehavior (ComponentOutput sub)
+        let output :: SBehavior (ComponentOutputT sub)
             output = fst <$> outputBehavior
 
         velem <- virtualElement (pure "div")

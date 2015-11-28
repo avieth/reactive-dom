@@ -10,6 +10,7 @@ Portability : non-portable (GHC only)
 
 {-# LANGUAGE AutoDeriveTypeable #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TypeFamilies #-}
 
 module Reactive.DOM.Component.Label where
 
@@ -21,16 +22,15 @@ import Reactive.DOM.Component
 import Reactive.Banana.Frameworks
 import GHCJS.Types (JSString)
 
-type Label = Simple JSString JSString
+data Label = Label
 
-label :: Label
-label = Simple makeLabel
-  where
-    makeLabel :: JSString -> MomentIO (JSString, VirtualElement Identity)
-    makeLabel labelText = do
+instance IsComponent Label where
+    type ComponentInputT Label = JSString
+    type ComponentOutputT Label = ()
+    makeComponent Label labelText = do
         velem <- virtualElement (pure "span")
                                 (pure (always M.empty))
                                 (pure (always M.empty))
                                 (pure (always M.empty))
                                 (pure (pure . text . pure <$> always labelText))
-        return (labelText, velem)
+        return ((), velem)

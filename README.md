@@ -11,11 +11,16 @@ with weak references in GHCJS, but it is resolved in
 Here's a preview of how to use it:
 
 ```Haskell
+import GHC.TypeLits
 import GHCJS.DOM
 import GHCJS.DOM.Document
+import GHCJS.DOM.Element as Element
 import Reactive.Banana.Frameworks
 import Reactive.DOM.Node
 import Reactive.DOM.Component
+import Reactive.DOM.Component.Label
+import Reactive.DOM.Component.TextInput
+import Reactive.DOM.Flow
 import Examples.Counter
 
 main :: IO ()
@@ -27,16 +32,65 @@ main = runWebGUI $ \webView -> do
     let networkDescription :: MomentIO ()
         networkDescription = mdo
 
-            -- This is the only interesting part of this snippet: run the
-            -- counter component, giving () as input, and then throw its
-            -- element into the DOM under the body. V stands for virtual, as
-            -- it's not actually a DOM element, and can be instantiated more
-            -- than once, as demonstrated. So two counters will appear, and
-            -- they will always show the same number, and why wouldn't they?
-            -- They are the same counter!
-            (_, counterVelem) <- runComponent counter ()
-            _ <- render document body counterVelem
-            _ <- render document body counterVelem
+            -- Here we demonstration the construction of a user interface
+            -- flow. It's a "click-to-edit" widget. Click on the label, and
+            -- it changes to a text box. Change the text box, and it goes back
+            -- to a label.
+            --
+            -- First step: define the components which compose it: a label and
+            -- a text input.
+            let label = component (ComponentBehavior Label)
+                                  -- Take the click event, and refer to it
+                                  -- by the type-level symbol "click".
+                                  -- The third argument computes the events
+                                  -- value in IO from the JavaScript element
+                                  -- and event object.
+                                  (withEvent (Proxy :: Proxy "click")
+                                             Element.click
+                                             (const (const (pure ())))
+                                             NoEvents
+                                  )
+
+            let textInput = component (TextInput)
+                                      (withEvent (Proxy :: Proxy "change")
+                                                 Element.change
+                                                 (const (const (pure ())))
+                                                 NoEvents
+                                      )
+
+            -- Our components in hand, we must alter their input and output
+            -- to fit our flow specification.
+            -- The label must take a single JSString, and output a SEvent ().
+            let flowLabel = dimap (always)
+                                  (getEvent (Proxy :: Proxy "click") . componentOutputevents)
+                                  (label)
+
+            -- Getting the text output, which must be SEvent JSString, is a bit
+            -- more complicated. We grab the change event, and use <% to sample
+            -- the text input box behavior whenever that happens.
+            let getOutputText :: ComponentOutput (SBehavior JSString) '[ '("change", ()) ]
+                              -> SEvent JSString
+                getOutputText output = const <$> componentOutput output
+                                             <%  getEvent (Proxy :: Proxy "change") (componentOutputEvents output)
+
+            let flowTextInput = dimap (always)
+                                      (getTextOutput)
+                                      (textInput)
+
+            -- Now we're ready to state the flow, using arrow notation.
+            let myFlow :: Flow JSString Void
+                myFlow = proc initialText -> do
+                             _ <-        flow flowLabel     <- initialText
+                             nextText <- flow flowTextInput <- initialText
+                             myFlow <- nextText
+
+            flowElem <- runKleisli (runFlow cteFlow) "Initial text. Click me!")
+
+            _ <- render document body flowElem
+
+            -- We can even render it in multiple places. All instantiations
+            -- will always be exactly the same.
+            _ <- render docume body flowElem
 
             return ()
 
@@ -46,129 +100,95 @@ main = runWebGUI $ \webView -> do
     return ()
 ```
 
-That's pretty dull. All of the cool Haskell magic is hidden away and all you
-see here is reactive-banana and ghcjs-dom boilerplate. If you're curious, then
-dive in using the following roadmap.
+## Informal overview
 
-## `Reactive.DOM.Node`
+### Flow
 
-In this module we define the `VirtualElement`. It takes `SBehavior`s (see
-[reactive-sequence](https://www.github.com/avieth/reactive-sequence)) of
-properties, attributes, style, and children, and when it's rendered to the
-DOM, reacts to changes in these. `SEvent`s can also be pulled from these
-`VirtualElement`s, such that actual DOM events from every rendering of the
-same `VirtualElement` will all be routed to this one `SEvent`. These are
-the elements from which `Component`s are built.
+The ultimate goal of the UI programmer is to define a `Flow s Void`. This is
+done via the `Flow` arrow. The name is intended to
+be suggestive: a `Flow s t` is a user-input-driven transformation from an `s`
+to a `t`. Think about those old Windows software setup wizards. They're simple
+examples of flows, which are advanced by button presses, sometimes with
+multiple paths (`Flow` is an `ArrowChoice`, so it can express this).
+Another example is some user
+interface which requires an authentication token `Flow Token Void`. You may
+want to compose this with a login `Flow () Token` to obtain `Flow () Void`,
+a complete flow.
 
-## `Reactive.DOM.Component`
+The function
+```Haskell
+runFlow :: Flow s Void -> Kleisli MomentIO s (VirtualElement Identity)
+```
+realizes the flow. That `VirtualElement` can of course be rendered to the DOM
+and it will come to life, following it's specification (the flow itself!).
 
-Working directly with `VirtualElement`s is not fun. It's error-prone, and
-quickly devolves into a mess of events and behaviors and recursive-do trip-ups.
-The notion of a `Component` is intended to encapsulate this complexity in a few
-versatile forms, guiding the programmer's definition of new `Component`s from
-old. Let's take a few examples.
+A note on the use of `Void`: picking `Void` for the second
+type parameter means that the resulting UI component has to output an
+`SEvent Void`. This admits only two possibilities: either the event never fires,
+leaving a single-component flow, or the event fires but is connected back to
+some earlier part of the same flow, yielding a looping flow with no loose
+ends. Check out the [source](Reactive/DOM/Flow.hs) to see how this all falls
+into place. It's actually really cool.
 
-### `Reactive.DOM.Component.Label`
+### Component
 
-This is a very simple `Component`: give any sequence of strings and you can
-get a label which always shows the current one. Not surprisingly, it's
-described by the `Simple` datatype. Any `Simple` is a `Component`, but it's
-the responsibility of the author of the simple component to show how to
-go from its input, to its output and a `VirtualElement`. Since these components
-are supposed to be *simple*, this shouldn't be a problem, and indeed it isn't
-a problem for the label:
+It's great that `Flow` is an arrow, but the category/arrow combinators alone
+are useless; we couldn't possibly use them to construct a `Flow s Void`, since
+we can't construct an `s -> Void`. But this is expected, because any useful
+`Flow` ought to contain enough to data to show something on screen. That's
+specified by a `Component`, and injected to a `Flow` via
 
 ```Haskell
--- Give JSStrings, get JSStrings. This means you can control the text by
--- choosing an appropriate sequence, and respond to the tiext by taking the
--- output.
-type Label = Simple (SBehavior JSString) (SBehavior JSString)
-
--- The implementation of the Label component follows.
-label :: Label
-label = Simple makeLabel
-  where
-    makeLabel :: SBehavior JSString -> MomentIO (SBehavior JSString, VirtualElement Identity)
-    makeLabel textSequence = do
-        -- This is easy enough: make a span which shows the text sequence, but
-        -- has no properties, attributes, nor style.
-        velem <- virtualElement (pure "span")
-                                (pure (always M.empty))
-                                (pure (always M.empty))
-                                (pure (always M.empty))
-                                (pure (pure . pure . text . pure <$> textSequence))
-        return (textSequence, velem)
+flow :: Component s (SEvent t) -> Flow s t
 ```
 
-### `Examples.Counter`
-
-The counter example, mentioned in the introduction, is our first example of
-a complex `Component`. It's composed of three subcomponents, and some routing
-logic which describes how those components interact with one-another.
-
+A `Component s t` is rather complicated, but I think it can be well described
+by an instance and a function:
 
 ```Haskell
--- What we have in mind is a component with two buttons--increment and
--- decrement--and a label showing the current value. This falls into the
--- Simultaneous type. What we have here makes the following statements:
---
---   - No input is required (just give ()).
---   - The counter is composed of three subcomponents: a Label and two Buttons.
---   - In order to make a counter, you have to describe how to compute inputs
---     for the subcomponents from outputs for those subcomponents. This
---     recursive treatment is essential: the input for the label depends upon
---     the outputs of the buttons, namely their click events.
--- 
--- Note that the :*: type is from Data.Algebraic.Product in the
--- Algebraic package at https://github.com/avieth/algebraic and is essentially
--- just a tuple, but more useful at the type level.
---
-type Counter = Simultaneous () (Label :*: Button :*: Button)
-
--- With the type given, we have bounds for our implementation.
--- The second parameter of Simultaneous is just the implementations of the
--- subcomponents, in the appropriate order. No problem.
--- The first parameter, however, contains the essence of the counter. It
--- routes outputs of subcomponents to inputs of subcomponents, giving rise
--- to the desired reactive behaviour.
-counter :: Counter
-counter = Simultaneous (const wireItUp) (label .*. button .*. button)
-  where
-    -- Note the lazy pattern! That's VERY important. Without it, we'll diverge.
-    wireItUp :: (SBehavior JSString :*: SEvent () :*: SEvent ())
-             -> (SBehavior JSString :*: SBehavior JSString :*: SBehavior JSString)
-    wireItUp ~(Product (_, Product (incr, decr))) = labelBehavior .*. incrLabel .*. decrLabel
-      where
-        -- The label for the increment button is always "+".
-        incrLabel = always "+"
-        -- Similarly, the label for the decrement button never changes from "-".
-        decrLabel = always "-"
-        -- From the increment event (it's the output of the first button in
-        -- the product) we can produce an event which increments something by
-        -- one.
-        incrEvent :: SEvent (Int -> Int)
-        incrEvent = (const ((+) 1)) <$> incr
-        -- Similarly for the decrement event.
-        decrEvent :: SEvent (Int -> Int)
-        decrEvent = (const (\x -> x - 1)) <$> decr
-        -- Here we merge the increment and decrement events. We appeal to the
-        -- semigroup First to disambiguate simultaneous evnts (which probably
-        -- won't ever happen, but it's good to be safe). The way we've
-        -- written it here, the increment wins over the decrement in case they
-        -- happen at the same time.
-        changes :: SEvent (Int -> Int)
-        changes = getFirst <$> ((First <$> incrEvent) <||> (First <$> decrEvent))
-        -- From changes, we can describe the sequence of counter values. We
-        -- do so recursively: assume we have the Behavior for this thing,
-        -- and use it to define the SBehavior (see reactive-sequence to learn
-        -- about the difference). All we say here is that it starts at 0,
-        -- and whenever changes gives us an event with (Int -> Int), apply
-        -- it to the current value.
-        countBehavior :: SBehavior Int
-        countBehavior = fixSBehavior' $ \behavior ->
-            sEventToSBehavior 0 (($) <$> changes %> behavior)
-        -- Finally, the label text is had by dumping the current value to
-        -- a JSString.
-        labelBehavior :: SBehavior JSString
-        labelBehavior = fromString . show <$> countBehavior
+instance Profunctor Component
+runComponent :: Component s t -> s -> MomentIO (t, VirtualElement Identity)
 ```
+
+Like a `Flow`, a `Component` can produce a `VirtualElement`, so there's our
+user-facing part. It's a `Profunctor`, so it's a *bit* like an `Arrow` but not
+quite, since it lacks an `id`, and there's definitely no way to give `arr`. Its
+`Profunctor`ness is helpful, though, for specializing the input and generalizing
+the output of a given `Component`; it makes them more recyclable.
+Now we see one way in which a `Flow s Void` could arise: the `Component` gives
+`never :: SEvent Void`.
+
+Since user interface components **must** be extensible (every software project
+will want its own domain of discourse for this) components are actually
+specified by a typeclass:
+
+```Haskell
+class IsComponent component where
+    type ComponentOutputT component :: *
+    type ComponentInputT component :: *
+    makeComponent
+        :: component
+        -> ComponentOutputT component
+        -> MomentIO (ComponentOutputT component, VirtualElement Identity)
+```
+
+Simple components like a label or button implement this class directly, using
+the `Reactive.DOM.Node` module to manually construct `VirtualElement`s.
+
+There are, however, some special `IsComponent` instances out there. In
+particular, this one:
+
+```Haskell
+data Knot subComponent where
+    Knot :: subComponent
+         -> (ComponentOutputT subComponent -> ComponentInputT subComponent)
+         -> Knot subComponent
+```
+
+Yes, to make a `Knot subComponent`, you must define the inputs of the
+subcomponent using only the outputs of that very same subcomponent. If you can
+do this in a sufficiently lazy way, then you're good to go; you've made a
+self-referential knot component! But you don't have to worry about tying it
+all together, because this is done once, in the `IsComponent` instance for
+`Knot subComponent`. So long as `subComponent` has an `IsComponent` instance,
+and you've lazily defined its input by its output, the knot will work.

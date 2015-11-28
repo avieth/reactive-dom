@@ -12,6 +12,7 @@ Portability : non-portable (GHC only)
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE RecursiveDo #-}
+{-# LANGUAGE TypeFamilies #-}
 
 module Reactive.DOM.Component.TextInput where
 
@@ -28,13 +29,12 @@ import GHCJS.DOM.Element as Element (input, change)
 
 -- Output is the sequence of input, and an event fired when the user submits the
 -- text.
-type TextInput = Simple (SBehavior JSString) (SBehavior JSString, SEvent JSString)
+data TextInput = TextInput
 
-textInput :: TextInput
-textInput = Simple makeTextInput
-  where
-    makeTextInput :: SBehavior JSString -> MomentIO ((SBehavior JSString, SEvent JSString), VirtualElement Identity)
-    makeTextInput textSequence = mdo
+instance IsComponent TextInput where
+    type ComponentInputT TextInput = SBehavior JSString
+    type ComponentOutputT TextInput = SBehavior JSString
+    makeComponent TextInput textSequence = mdo
         -- TODO should use semigroups to ensure that, even if we allow the
         -- programmer to modulate the attributes of a virtual element, that
         -- it can never change the type from text.
@@ -49,8 +49,6 @@ textInput = Simple makeTextInput
                                 (pure (always []))
         inputEvent :: SEvent JSString
             <- virtualEvent velem Element.input (\el _ -> maybe "" id <$> getValue (castToHTMLInputElement el))
-        changeEvent :: SEvent JSString
-            <- virtualEvent velem Element.change (\el _ -> maybe "" id <$> getValue (castToHTMLInputElement el))
         let outputBehavior :: SBehavior JSString
             outputBehavior = getFirst <$> ((First <$> textSequence) <||> (First <$> inputEvent))
-        pure ((outputBehavior, changeEvent), velem)
+        pure (outputBehavior, velem)

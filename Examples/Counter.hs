@@ -12,6 +12,8 @@ Portability : non-portable (GHC only)
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE TypeFamilies #-}
 
 module Examples.Counter where
 
@@ -27,44 +29,54 @@ import GHCJS.Types (JSString)
 -- more useful at the type level.
 import Data.Algebraic.Product
 
-import Debug.Trace
-
--- What we have in mind is a component with two buttons--increment and
--- decrement--and a label showing the current value. This falls into the
--- Simultaneous type. What we have here makes the following statements:
+-- We want to say that a counter is built from *ANY* component which has
+-- a particular input/output form:
 --
---   - No input is required (just give ()).
---   - The counter is composed of three subcomponents: a Label and two Buttons.
---   - In order to make a counter, you have to describe how to compute inputs
---     for the subcomponents from outputs for those subcomponents. This
---     recursive treatment is essential: the input for the label depends upon
---     the outputs of the buttons, namely their click events.
+--     input : (SBehavior Int)
+--     output : (SEvent () :*: SEvent ())
 --
-type Counter = Simultaneous () (ComponentBehavior Label :*: Button :*: Button)
+-- Thus the user can freely construct some component with this signature, and
+-- all the counter component shall do is state the wiring from output to
+-- input.
+--
+-- The Counter then gives back the input of the subcomponent, so that its
+-- users can observe the counter.
+data Counter sub where
+    Counter
+        :: ( IsComponent sub
+           , ComponentInputT sub ~ SBehavior Int
+           , ComponentOutputT sub ~ (SEvent () :*: SEvent ())
+           )
+        -- It's important to take the SBehavior input here, so that the
+        -- Knot's routing function can use it.
+        => (SBehavior Int -> Knot sub)
+        -> Counter sub
 
--- With the type given, we have bounds for our implementation.
--- The second parameter of Simultaneous is just the implementations of the
--- subcomponents, in the appropriate order. No problem.
--- The first parameter, however, contains the essence of the counter. It
--- routes outputs of subcomponents to inputs of subcomponents, giving rise
--- to the desired reactive behaviour.
-counter :: Counter
-counter = Simultaneous (const wireItUp) (ComponentBehavior label .*. button .*. button)
+instance IsComponent sub => IsComponent (Counter sub) where
+    type ComponentInputT (Counter sub) = SBehavior Int
+    type ComponentOutputT (Counter sub) = SBehavior Int
+    makeComponent (Counter makeKnot) inputBehavior = do
+        ((input, output), velem) <- makeComponent (makeKnot inputBehavior) ()
+        -- We choose the input of the subcomponent, recursively determined by
+        -- its output, as the output of the Counter.
+        pure (input, velem)
+
+counter
+    :: ( IsComponent sub
+       , ComponentInputT sub ~ SBehavior Int
+       , ComponentOutputT sub ~ (SEvent () :*: SEvent ())
+       )
+    => sub
+    -> Counter sub
+counter sub = Counter (\reset -> Knot sub (wireItUp reset))
   where
     -- Note the lazy pattern! That's VERY important. Without it, we'll diverge.
-    wireItUp :: (SBehavior JSString :*: SEvent () :*: SEvent ())
-             -> (SBehavior JSString :*: SBehavior JSString :*: SBehavior JSString)
-    wireItUp ~(Product (_, Product (incr, decr))) =
-        -- The label for the increment button is always "+".
-        let incrLabel = always "+"
-        -- Similarly, the label for the decrement button never changes from "-".
-            decrLabel = always "-"
-        -- From the increment event (it's the output of the first button in
-        -- the product) we can produce an event which increments something by
-        -- one.
-            incrEvent :: SEvent (Int -> Int)
+    wireItUp :: SBehavior Int
+             -> (SEvent () :*: SEvent ())
+             -> SBehavior Int
+    wireItUp reset ~(Product (incr, decr)) =
+        let incrEvent :: SEvent (Int -> Int)
             incrEvent = (const (\x -> x + 1)) <$> incr
-        -- Similarly for the decrement event.
             decrEvent :: SEvent (Int -> Int)
             decrEvent = (const (\x -> x - 1)) <$> decr
         -- Here we merge the increment and decrement events. We appeal to the
@@ -77,14 +89,19 @@ counter = Simultaneous (const wireItUp) (ComponentBehavior label .*. button .*. 
         -- From changes, we can describe the sequence of counter values. We
         -- do so recursively: assume we have the Behavior for this thing,
         -- and use it to define the SBehavior (see reactive-sequence to learn
-        -- about the difference). All we say here is that it starts at 0,
-        -- and whenever changes gives us an event with (Int -> Int), apply
-        -- it to the current value.
+        -- about the difference). All we say here is that it starts with
+        -- whatever value the inputs start, and whenever changes gives us an
+        -- event with (Int -> Int), apply it to the current value. Later values
+        -- of the input behavior will reset the counter.
             countBehavior :: SBehavior Int
             countBehavior = fixSBehavior $ \sbehavior ->
-                0 |> (($) <$> changes %> sbehavior)
-        -- Finally, the label text is had by dumping the current value to
-        -- a JSString.
-            labelBehavior :: SBehavior JSString
-            labelBehavior = fromString . show <$> countBehavior
-        in  (labelBehavior .*. incrLabel .*. decrLabel)
+                let bumps :: SEvent Int
+                    -- We must trim the sequence (drop the first element)
+                    -- so that we are lazy in the recursive input sbehavior.
+                    -- NB the following, in which we trim the sequence directly,
+                    -- doesn't work. Somehow the event is discarded and never
+                    -- fires. Weird! Could be a problem with %> (bundle).
+                    --bumps = ($) <$> changes %> (sequenceTrim sbehavior)
+                    bumps = sequenceTrim $ ($) <$> changes %> sbehavior
+                in  getFirst <$> ((First <$> reset) <||> (First <$> bumps))
+        in  countBehavior

@@ -9,6 +9,7 @@ Portability : non-portable (GHC only)
 -}
 
 {-# LANGUAGE AutoDeriveTypeable #-}
+{-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Reactive.DOM.Component.Button where
@@ -22,17 +23,15 @@ import Reactive.Banana.Frameworks
 import GHCJS.Types (JSString)
 import GHCJS.DOM.Element as Element (click)
 
-type Button = Simple (SBehavior JSString) (SEvent ())
+data Button = Button
 
-button :: Button
-button = Simple makeButton
-  where
-    makeButton :: SBehavior JSString -> MomentIO (SEvent (), VirtualElement Identity)
-    makeButton textSequence = do
+instance IsComponent Button where
+    type ComponentInputT Button = JSString
+    type ComponentOutputT Button = ()
+    makeComponent Button labelText = do
         velem <- virtualElement (pure "button")
                                 (pure (always M.empty))
                                 (pure (always M.empty))
                                 (pure (always M.empty))
-                                (pure (pure . text . pure <$> textSequence))
-        click <- virtualEvent velem Element.click (\_ _ -> return ())
-        return (click, velem)
+                                (pure (pure . text . pure <$> (always labelText)))
+        return ((), velem)
