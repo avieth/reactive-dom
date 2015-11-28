@@ -1,7 +1,7 @@
 # reactive-dom
 
 Definitions in this project help the programmer to wire up a reactive DOM user
-interface via reactive-banana and ghcjs-dom.
+interface via reactive-sequence and ghcjs-dom.
 
 This is **experimental** software, but it's also **working** software, subject
 to one restriction: there is an
@@ -135,7 +135,7 @@ into place. It's actually really cool.
 It's great that `Flow` is an arrow, but the category/arrow combinators alone
 are useless; we couldn't possibly use them to construct a `Flow s Void`, since
 we can't construct an `s -> Void`. But this is expected, because any useful
-`Flow` ought to contain enough to data to show something on screen. That's
+`Flow` ought to contain enough data to show something on screen. That's
 specified by a `Component`, and injected to a `Flow` via
 
 ```Haskell
