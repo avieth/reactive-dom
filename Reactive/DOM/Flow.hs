@@ -43,39 +43,44 @@ import Reactive.Sequence
 import Reactive.DOM.Node
 import Reactive.DOM.Component
 
--- | A @Flow s t@ describes a sequence of components, each of which produces
---   precisely one event which contains the input to the next.
-data Flow s t where
-    FlowArr :: (s -> t) -> Flow s t
-    FlowCompose :: Flow u t -> Flow s u -> Flow s t
-    FlowFirst :: Flow s t -> Flow (s, c) (t, c)
-    FlowLeft :: Flow s t -> Flow (Either s c) (Either t c)
-    FlowComponent :: Component s (SEvent t) -> Flow s t
+-- | A @Flow f g o s t@ describes a sequence of components, each of which
+--   produces an event which contains the input to the next, as well as
+--   some @Sequence f g o@.
+data Flow f g o s t where
+    FlowArr :: (s -> t) -> Flow f g o s t
+    FlowCompose :: Flow f g o u t -> Flow f g o s u -> Flow f g o s t
+    FlowFirst :: Flow f g o s t -> Flow f g o (s, c) (t, c)
+    FlowLeft :: Flow f g o s t -> Flow f g o (Either s c) (Either t c)
+    FlowComponent :: Component s (Sequence f g o, SEvent t) -> Flow f g o s t
 
 -- | A @CompleteFlow s@ is a neverending @Flow@. Give an input @s@ and you'll
 --   have a non-stop user interface. Only this kind of @Flow@ can be run to
 --   produce a @VirtualElement@ (see @runFlow@).
-type CompleteFlow s = Flow s Void
+type CompleteFlow f g o s = Flow f g o s Void
 
-instance Category Flow where
+instance Category (Flow f g o) where
     id = FlowArr id
     (.) = FlowCompose
 
-instance Arrow Flow where
+instance Arrow (Flow f g o) where
     arr = FlowArr
     first = FlowFirst
 
-instance ArrowChoice Flow where
+instance ArrowChoice (Flow f g o) where
     left = FlowLeft
 
-instance IsComponent (Flow s Void) where
-    type ComponentInputT (Flow s Void) = s
-    type ComponentOutputT (Flow s Void) = SEvent Void
-    makeComponent flow s = do
-        velem <- runKleisli (runFlow flow) s
-        pure (never, velem)
+instance
+    ( Switchable Identity f Identity g
+    , SwitchesTo (SBehavior (Sequence f g o)) ~ Sequence f g o
+    , Functor f
+    , Functor g
+    ) => IsComponent (Flow f g o s Void)
+  where
+    type ComponentInputT (Flow f g o s Void) = s
+    type ComponentOutputT (Flow f g o s Void) = Sequence f g o
+    makeComponent flow s = runKleisli (runFlow flow) s
 
-flow :: Component s (SEvent t) -> Flow s t
+flow :: Component s (Sequence f g o, SEvent t) -> Flow f g o s t
 flow = FlowComponent
 
 -- Here's what we need.
@@ -84,54 +89,58 @@ flow = FlowComponent
 -- one, since 3 of 5 constructors are ruled out.
 --
 -- Here we bundle all the information needed to run the component.
-data NextComponent where
+data NextComponent f g o where
     FoundComponent
-        :: Component s (SEvent t)
+        :: Component s (Sequence f g o, SEvent t)
         -> s
-        -> (t -> NextComponent)
-        -> NextComponent
+        -> (t -> NextComponent f g o)
+        -> NextComponent f g o
 
 runNextComponent
-    :: NextComponent
-    -> MomentIO (SEvent NextComponent, VirtualElement Identity)
+    :: forall f g o .
+       NextComponent f g o
+    -> MomentIO ((Sequence f g o, SEvent (NextComponent f g o)), VirtualElement Identity)
 runNextComponent (FoundComponent component input next) = do
-    (output, velem) <- runComponent component input
-    pure (next <$> output, velem)
+    ((output, event), velem) <- runComponent component input
+    pure ((output, next <$> event), velem)
 
-runNextComponents :: NextComponent -> MomentIO (SBehavior (VirtualElement Identity))
+runNextComponents
+    :: forall f g o .
+       NextComponent f g o
+    -> MomentIO (SBehavior (Sequence f g o, VirtualElement Identity))
 runNextComponents component = mdo
 
-    initial :: (SEvent NextComponent, VirtualElement Identity)
+    initial :: ((Sequence f g o, SEvent (NextComponent f g o)), VirtualElement Identity)
         <- runNextComponent component
 
-    let outputBehavior :: SBehavior (SEvent NextComponent, VirtualElement Identity)
+    let outputBehavior :: SBehavior ((Sequence f g o, SEvent (NextComponent f g o)), VirtualElement Identity)
         outputBehavior = initial |> changes
 
-    let outputLagged :: SBehavior (SEvent NextComponent, VirtualElement Identity)
+    let outputLagged :: SBehavior ((Sequence f g o, SEvent (NextComponent f g o)), VirtualElement Identity)
         outputLagged = lag outputBehavior
 
 
     -- That's a big type... Means we always have a latest event which will
     -- product later events.
-    let fmappedNext :: SBehavior (SEvent (MomentIO (SEvent NextComponent, VirtualElement Identity)))
-        fmappedNext = fmap (fmap runNextComponent . fst) outputLagged
+    let fmappedNext :: SBehavior (SEvent (MomentIO ((Sequence f g o, SEvent (NextComponent f g o)), VirtualElement Identity)))
+        fmappedNext = fmap (fmap runNextComponent . snd . fst) outputLagged
 
-    let next :: SBehavior (SEvent (SEvent NextComponent, VirtualElement Identity))
+    let next :: SBehavior (SEvent ((Sequence f g o, SEvent (NextComponent f g o)), VirtualElement Identity))
         next = fmap (sequenceCommute (const (pure (Const ())))
                                      (fmap Identity . runIdentity)
                     )
                     fmappedNext
 
-    let changes :: SEvent (SEvent NextComponent, VirtualElement Identity)
+    let changes :: SEvent ((Sequence f g o, SEvent (NextComponent f g o)), VirtualElement Identity)
         changes = switch (flip const) next
 
-    pure (snd <$> outputBehavior)
+    pure ((\((out, _), velem) -> (out, velem)) <$> outputBehavior)
 
 nextComponentK
-    :: forall s t .
-       Flow s t
-    -> (t -> NextComponent)
-    -> (s -> NextComponent)
+    :: forall f g o s t .
+       Flow f g o s t
+    -> (t -> NextComponent f g o)
+    -> (s -> NextComponent f g o)
 nextComponentK flow k = case flow of
     FlowComponent component -> \s -> FoundComponent component s k
     FlowArr f -> k . f
@@ -146,9 +155,9 @@ nextComponentK flow k = case flow of
 -- This is actually way cool. Look how using Void ties the knot given
 -- in nextComponentK, which assumes the ability to produce a NextComponent.
 nextComponent
-    :: forall s .
-       Flow s Void
-    -> (s -> NextComponent)
+    :: forall f g o s .
+       Flow f g o s Void
+    -> (s -> NextComponent f g o)
 nextComponent flow = \s -> case flow of
     -- Note that this constructor is not ruled out by the Void.
     -- However, we know that its output event *can never fire*!
@@ -160,21 +169,30 @@ nextComponent flow = \s -> case flow of
         in  nextComponentK right leftComponent s
 
 flowBehavior
-    :: forall s .
-       Flow s Void
-    -> Kleisli MomentIO s (SBehavior (VirtualElement Identity))
+    :: forall f g o s .
+       Flow f g o s Void
+    -> Kleisli MomentIO s (SBehavior (Sequence f g o, VirtualElement Identity))
 flowBehavior flow = Kleisli $ \s -> runNextComponents (nextComponent flow s)
 
--- | Produce a virtual element which shows a complete flow.
+-- | Produce a virtual element which shows a complete flow, along with the
+--   switched output.
 runFlow
-    :: forall s .
-       Flow s Void
-    -> Kleisli MomentIO s (VirtualElement Identity)
+    :: forall f g o s .
+       ( Switchable Identity f Identity g
+       , SwitchesTo (SBehavior (Sequence f g o)) ~ Sequence f g o
+       , Functor f
+       , Functor g
+       )
+    => Flow f g o s Void
+    -> Kleisli MomentIO s (Sequence f g o, VirtualElement Identity)
 runFlow flow = Kleisli $ \s -> do
-    velems <- runKleisli (flowBehavior flow) s
+    output <- runKleisli (flowBehavior flow) s
+    let outputs = fst <$> output
+    let out = switch (flip const) outputs
+    let velems = snd <$> output
     velem <- virtualElement (pure "div")
                             (pure (always mempty))
                             (pure (always mempty))
                             (pure (always mempty))
                             (pure (pure . node <$> velems))
-    return velem
+    return (out, velem)
