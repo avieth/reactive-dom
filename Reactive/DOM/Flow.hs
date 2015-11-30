@@ -23,6 +23,7 @@ module Reactive.DOM.Flow (
       Flow
     , CompleteFlow
     , flow
+    , inertFlow
     , flowMap
     , runFlow
     , flowBehavior
@@ -84,6 +85,11 @@ instance
 
 flow :: Component s (Sequence f g o, SEvent t) -> Flow f g o s t
 flow = FlowComponent
+
+-- | Take any component and make it flow which never advances.
+--   Specialize t to Void and you've got a complete flow.
+inertFlow :: Sequence f g o -> Component s t -> Flow f g o s t
+inertFlow sequence = FlowComponent . rmap (const (sequence, never))
 
 -- | Alter the common result type of the flow, result type being the third
 --   type parameter. Not to be confused with the output type.
