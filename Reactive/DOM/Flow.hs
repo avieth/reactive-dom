@@ -23,6 +23,7 @@ module Reactive.DOM.Flow (
       Flow
     , CompleteFlow
     , flow
+    , flowMap
     , runFlow
     , flowBehavior
 
@@ -34,6 +35,7 @@ import Control.Category
 import Control.Arrow
 import Data.Void
 import Data.Functor.Identity
+import Data.Profunctor
 import Data.Monoid (mempty)
 import Data.Algebraic.Index
 import Data.Algebraic.Sum
@@ -82,6 +84,20 @@ instance
 
 flow :: Component s (Sequence f g o, SEvent t) -> Flow f g o s t
 flow = FlowComponent
+
+-- | Alter the common result type of the flow, result type being the third
+--   type parameter. Not to be confused with the output type.
+flowMap
+    :: (Functor f, Functor g)
+    => (Sequence f g o -> Sequence f' g' o')
+    -> Flow f g o s t
+    -> Flow f' g' o' s t
+flowMap f term = case term of
+    FlowArr f -> FlowArr f
+    FlowCompose left right -> FlowCompose (flowMap f left) (flowMap f right)
+    FlowFirst sub -> FlowFirst (flowMap f sub)
+    FlowLeft sub -> FlowLeft (flowMap f sub)
+    FlowComponent component -> FlowComponent (rmap (\(l, r) -> (f l, r)) component)
 
 -- Here's what we need.
 -- The idea is to produce the next component from a Flow.

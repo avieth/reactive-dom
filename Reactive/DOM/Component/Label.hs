@@ -16,6 +16,8 @@ module Reactive.DOM.Component.Label where
 
 import qualified Data.Map as M
 import Data.Functor.Identity
+import Data.Semigroup
+import qualified Data.Text as T
 import Reactive.Sequence
 import Reactive.DOM.Node
 import Reactive.DOM.Component
@@ -25,12 +27,12 @@ import GHCJS.Types (JSString)
 data Label = Label
 
 instance IsComponent Label where
-    type ComponentInputT Label = JSString
+    type ComponentInputT Label = T.Text
     type ComponentOutputT Label = ()
     makeComponent Label labelText = do
         velem <- virtualElement (pure "span")
-                                (pure (always M.empty))
-                                (pure (always M.empty))
-                                (pure (always M.empty))
+                                (pure (always mempty))
+                                (pure (always mempty))
+                                (pure (always mempty))
                                 (pure (pure . text . pure <$> always labelText))
         return ((), velem)

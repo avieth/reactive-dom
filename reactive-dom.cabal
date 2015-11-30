@@ -18,8 +18,14 @@ cabal-version:       >=1.10
 library
   exposed-modules:     Reactive.DOM.Node
                      , Reactive.DOM.Component
+                     , Reactive.DOM.Flow
                      , Reactive.DOM.Window
                      , Reactive.DOM.XHR
+                     , Reactive.DOM.Component.Label
+                     , Reactive.DOM.Component.Button
+                     , Reactive.DOM.Component.TextInput
+                     , Reactive.DOM.Component.PasswordInput
+                     , Reactive.DOM.Component.Wait
 
   -- other-modules:       
   other-extensions:    AutoDeriveTypeable
@@ -41,6 +47,9 @@ library
                      , bifunctors
                      , async
                      , reactive-sequence
+                     , algebraic-data >= 0.1.0.0 && < 0.2.0.0
+                     , xss-sanitize >= 0.3.0.0 && < 0.4.0.0
+                     , text
 
   -- hs-source-dirs:      
   default-language:    Haskell2010

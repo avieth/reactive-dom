@@ -26,15 +26,11 @@ module Reactive.DOM.Component (
 
       IsComponent(..)
     , Component
-    , ComponentOutput
-    , componentOutput
-    , componentOutputEvents
     , component
     , runComponent
-    , styleComponent
-    , withEvent
-    , getEvent
-    , ComponentEvents(..)
+    , componentEvent
+    , componentStyle
+    , componentAttributes
     , ComponentBehavior(..)
     , ComponentProduct(..)
     , ComponentSum(..)
@@ -73,94 +69,26 @@ class IsComponent t where
         -> ComponentInputT t
         -> MomentIO (ComponentOutputT t, VirtualElement Identity)
 
-type family NewEventName (name :: Symbol) (events :: [(Symbol, *)]) :: Bool where
-    NewEventName name '[] = 'True
-    NewEventName name ( '(name, t) ': rest ) = 'False
-    NewEventName name ( '(name', t) ': rest ) = NewEventName name rest
-
-type family EventType (name :: Symbol) (events :: [(Symbol, *)]) :: * where
-    EventType name ( '(name, t) ': rest ) = t
-    EventType name ( '(name', t) ': rest ) = EventType name rest
-
-class HasEvent (name :: Symbol) (events :: [(Symbol, *)]) where
-    getEvent
-        :: Proxy name
-        -> ComponentEventsOutput events
-        -> SEvent (EventType name events)
-
-instance {-# OVERLAPS #-} HasEvent name ( '(name, t) ': rest ) where
-    getEvent _ (HandleEventOutput _ sevent _) = sevent
-
-instance {-# OVERLAPS #-}
-    ( HasEvent name rest
-    , EventType name rest ~ EventType name ( '(name', t) ': rest )
-    ) => HasEvent name ( '(name', t) ': rest )
-  where
-    getEvent proxy (HandleEventOutput _ _ rest) = getEvent proxy rest
-
-data ComponentEvents (events :: [(Symbol, *)]) where
-    NoEvents :: ComponentEvents '[]
-    HandleEvent
-        :: ( NewEventName symbol events ~ 'True
-           , IsEvent event
-           )
-        => Proxy symbol
-        -> EventName Element.Element event
-        -> (Element.Element -> event -> IO t)
-        -> ComponentEvents events
-        -> ComponentEvents ( '(symbol, t) ': events)
-
--- You can wire up events whenever the events are showing in the output.
-withEvent
-    :: ( NewEventName symbol events ~ 'True
-       , IsEvent event
-       )
-    => Proxy symbol
-    -> EventName Element.Element event
-    -> (Element.Element -> event -> IO r)
-    -> ComponentEvents events
-    -> ComponentEvents ( '(symbol, r) ': events )
-withEvent = HandleEvent
-
-data ComponentEventsOutput events where
-    NoEventsOutput :: ComponentEventsOutput '[]
-    HandleEventOutput
-        :: (
-           )
-        => Proxy name
-        -> SEvent t
-        -> ComponentEventsOutput events
-        -> ComponentEventsOutput ( '(name, t) ': events )
-
-wireComponentEvents
-    :: ComponentEvents events
-    -> VirtualElement Identity
-    -> MomentIO (ComponentEventsOutput events)
-wireComponentEvents term velem = case term of
-    NoEvents -> pure NoEventsOutput
-    HandleEvent proxy eventName handler rest ->
-        HandleEventOutput proxy <$> (virtualEvent velem eventName handler)
-                                <*> (wireComponentEvents rest velem)
-
-data ComponentOutput t events = ComponentOutput {
-      componentOutput :: t
-    , componentOutputEvents :: ComponentEventsOutput events
-    }
-
 data Component s t where
     Component
         :: ( IsComponent component
            )
         => component
         -> (s -> ComponentInputT component)
-        -> (ComponentOutput (ComponentOutputT component) events -> t)
+        -- Output is a Kleisli arrow so that we can, for instance, tack on
+        -- DOM events as part of the output. Only benign side-effects should
+        -- be performed here.
+        -> ((ComponentOutputT component, VirtualElement Identity) -> MomentIO t)
+        -> SBehavior Attributes
         -> SBehavior Style
-        -> ComponentEvents events
         -> Component s t
 
 instance Profunctor Component where
     dimap l r component = case component of
-        Component c f g s e -> Component c (f . l) (r . g) s e
+        Component c f g a s -> Component c (f . l) (fmap r . g) a s
+
+instance Functor (Component s) where
+    fmap = rmap
 
 -- | This instance allows us to nest Components.
 instance IsComponent (Component s t) where
@@ -169,34 +97,92 @@ instance IsComponent (Component s t) where
     makeComponent = runComponent
 
 component
-    :: forall (events :: [(Symbol, *)]) component .
+    :: forall component .
        ( IsComponent component
        )
     => component
-    -> ComponentEvents events
     -> Component (ComponentInputT component) 
-                 (ComponentOutput (ComponentOutputT component) events)
-component c = Component c id id (always mempty)
+                 (ComponentOutputT component)
+component c = Component c id (pure . fst) (always mempty) (always mempty)
 
 runComponent :: Component s t -> s -> MomentIO (t, VirtualElement Identity)
-runComponent (Component component inp out style events) input = do
+runComponent (Component component inp out attributes style) input = do
     (output, velem) <- makeComponent component (inp input)
+    let attributesVelem = velemMergeAttributes attributes velem
     let styledVelem = velemMergeStyle style velem
-    events' <- wireComponentEvents events velem
-    let packagedOutput = ComponentOutput output events'
-    pure (out packagedOutput, styledVelem)
+    output' <- out (output, velem)
+    pure (output', styledVelem)
 
-styleComponent
+{-
+-- | Instructions on which DOM events to bind, and how to merge these events
+--   with the output of a component.
+data ComponentEvents s t where
+    NoEvents :: ComponentEvents s s
+    HandleEvent
+        :: ( IsEvent event
+           )
+        => EventName Element.Element event
+        -> (Element.Element -> event -> IO r)
+        -> (u -> SEvent r -> t)
+        -> ComponentEvents s u
+        -> ComponentEvents s t
+
+-- | This wires all of the events from a ComponentEvents datatype, producing
+--   ultimately a function which will transform the original output of the
+--   component into one which is a function of those events.
+wireComponentEvents
+    :: forall s t . 
+       ( )
+    => ComponentEvents s t
+    -> VirtualElement Identity
+    -> MomentIO (s -> t)
+wireComponentEvents cevents velem = case cevents of
+    NoEvents -> pure id
+    HandleEvent eventName mk (f :: u -> SEvent r -> t) rest -> do
+        vevent :: SEvent r <- virtualEvent velem eventName mk
+        vevents :: s -> u <- wireComponentEvents rest velem
+        pure ((flip f vevent) . vevents)
+-}
+
+componentEvent
+    :: forall event s u r t .
+       ( IsEvent event
+       )
+    => EventName Element.Element event
+    -> (Element.Element -> event -> IO r)
+    -> (u -> SEvent r -> t)
+    -> Component s u
+    -> Component s t
+componentEvent eventName mk merge (Component c f g a s) = Component c f g' a s
+  where
+    g' (u, velem) = do
+        vevent <- virtualEvent velem eventName mk
+        rest <- g (u, velem)
+        pure (merge rest vevent)
+
+componentStyle
     :: ( Bundleable f Identity g Identity
        , BundlesTo (Sequence f g) (SBehavior) ~ SBehavior
        )
     => Sequence f g Style
     -> Component s t
     -> Component s t
-styleComponent sequence (Component c f g s es) = Component c f g s' es
+componentStyle sequence (Component c f g a s) = Component c f g a s'
   where
     s' :: SBehavior Style
     s' = (<>) <$> sequence <%> s
+
+componentAttributes
+    :: ( Bundleable f Identity g Identity
+       , BundlesTo (Sequence f g) (SBehavior) ~ SBehavior
+       )
+    => Sequence f g Attributes
+    -> Component s t
+    -> Component s t
+componentAttributes sequence (Component c f g a s) = Component c f g a' s
+  where
+    a' :: SBehavior Attributes
+    a' = (<>) <$> sequence <%> a
 
 -- | ComponentBehavior sub takes an SBehavior of the input of sub, and gives
 --   an SBehavior of its output. Whenever the input SBehavior changes, the
@@ -226,9 +212,9 @@ instance IsComponent sub => IsComponent (ComponentBehavior sub) where
         let children :: SBehavior (VirtualElement Identity)
             children = snd <$> commuted
         velem <- virtualElement (pure "div")
-                                (pure (always M.empty))
-                                (pure (always M.empty))
-                                (pure (always M.empty))
+                                (pure (always mempty))
+                                (pure (always mempty))
+                                (pure (always mempty))
                                 (pure ((pure . node <$> children)))
         pure (outputs, velem)
 
@@ -243,9 +229,9 @@ instance
     makeComponent (ComponentProduct sub) input = do
         (output, velems) <- makeComponentProduct sub proxy input
         velem <- virtualElement (pure "div")
-                                (pure (always M.empty))
-                                (pure (always M.empty))
-                                (pure (always M.empty))
+                                (pure (always mempty))
+                                (pure (always mempty))
+                                (pure (always mempty))
                                 (pure (always (node <$> velems)))
         pure (output, velem)
       where
@@ -408,9 +394,9 @@ instance (IsComponent sub) => IsComponent (Switched sub) where
             output = fst <$> outputBehavior
 
         velem <- virtualElement (pure "div")
-                                (pure (always M.empty))
-                                (pure (always M.empty))
-                                (pure (always M.empty))
+                                (pure (always mempty))
+                                (pure (always mempty))
+                                (pure (always mempty))
                                 (pure (pure . node <$> children))
 
         pure (output, velem)

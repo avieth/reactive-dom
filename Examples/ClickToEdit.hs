@@ -30,14 +30,16 @@ type LabelWithClick = WithEvent MouseEvent () Label
 labelWithClick :: LabelWithClick
 labelWithClick = WithEvent (Element.click) (\_ _ -> pure ()) label
 
-type ClickToEdit = Switched JSString
-                            (ComponentSum (   TextInput
-                                          :*: LabelWithClick
-                                          )
-                            )
+type ClickToEdit = Composite JSString
+                             (Switched (ComponentSum (   TextInput
+                                                     :*: LabelWithClick
+                                                     )
+                                       )
+                             )
+                             ()
 
 clickToEdit :: ClickToEdit
-clickToEdit = Switched makeInput transition (ComponentSum (textInput .*. labelWithClick))
+clickToEdit = Composite makeInput (Switched transition (ComponentSum (textInput .*. labelWithClick))) makeOutput
   where
     makeInput :: JSString -> (ComponentInput TextInput :+: ComponentInput Label)
     makeInput = inject one . always
@@ -48,3 +50,4 @@ clickToEdit = Switched makeInput transition (ComponentSum (textInput .*. labelWi
         -- component, thereby switching to the label.
         Left (_, changeEvent) -> inject two <$> changeEvent
         Right (clickEvent, currentText) -> const (inject one (always currentText)) <$> clickEvent
+    makeOutput = const ()

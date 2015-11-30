@@ -24,11 +24,15 @@ module Reactive.DOM.Node where
 import Control.Monad
 import Control.Monad.Trans.Reader
 import Control.Monad.IO.Class
+import Data.Semigroup (Semigroup(..))
 import Data.Functor.Identity
 import Data.Unique
 import qualified Data.Map as M
 import Data.IORef
-import Data.Monoid (All(..))
+import Data.Monoid (All(..), Monoid, mempty, mappend)
+import qualified Data.Text as T
+import Data.JSString.Text
+import Text.HTML.SanitizeXSS (sanitizeXSS)
 import GHCJS.Types
 import GHCJS.DOM.Types hiding (Event)
 import qualified GHCJS.DOM.Types as DOM.Types
@@ -43,9 +47,45 @@ import Reactive.Banana.Frameworks
 import Reactive.Sequence
 import Unsafe.Coerce
 
-type Properties = M.Map JSString JSString
-type Style = M.Map JSString JSString
-type Attributes = M.Map JSString JSString
+-- We need a semigroup in which we can say
+--
+--     Immutable JSString
+--     Mutable JSString
+--
+--     Immutable x <> _ = Immutable x
+--     Mutable x <> y = y
+--     
+data Precedence t where
+    Immutable :: t -> Precedence t
+    Mutable :: t -> Precedence t
+
+dropPrecedence :: Precedence t -> t
+dropPrecedence term = case term of
+    Immutable t -> t
+    Mutable t -> t
+
+instance Semigroup (Precedence t) where
+    left <> right = case left of
+        Immutable t -> Immutable t
+        Mutable t -> right
+
+newtype MapWithPrecedence k v = MapWithPrecedence {
+      outMapWithPrecedence :: M.Map k (Precedence v)
+    }
+
+runMapWithPrecedence :: MapWithPrecedence k v -> M.Map k v
+runMapWithPrecedence = fmap dropPrecedence .outMapWithPrecedence
+
+instance Ord k => Semigroup (MapWithPrecedence k v) where
+    left <> right = MapWithPrecedence (M.unionWith (<>) (outMapWithPrecedence left) (outMapWithPrecedence right))
+
+instance Ord k => Monoid (MapWithPrecedence k v) where
+    mappend = (<>)
+    mempty = MapWithPrecedence mempty
+
+type Properties = MapWithPrecedence T.Text T.Text
+type Style = MapWithPrecedence T.Text T.Text
+type Attributes = MapWithPrecedence T.Text T.Text
 
 type VirtualElementEvents = M.Map DOMString VirtualEvent
 
@@ -92,7 +132,7 @@ eval (Eval x f) = f x
 -- | 
 data VirtualElement (m :: * -> *) = VirtualElement {
       virtualElementUnique :: Unique
-    , virtualElementTag :: m JSString
+    , virtualElementTag :: m T.Text
     , virtualElementProperties :: m (SBehavior Properties)
     , virtualElementAttributes :: m (SBehavior  Attributes)
     , virtualElementStyle :: m (SBehavior Style)
@@ -107,6 +147,22 @@ instance Eq (VirtualElement m) where
 instance Ord (VirtualElement m) where
     x `compare` y = virtualElementUnique x `compare` virtualElementUnique y
 
+velemMergeAttributes
+    :: forall f g m .
+       ( Functor m
+       , UnionsTo (Sequence f g) (SBehavior) ~ SBehavior
+       , Unionable f Identity g Identity
+       )
+    => Sequence f g Attributes
+    -> VirtualElement m
+    -> VirtualElement m
+velemMergeAttributes sequence velem = velem {
+      virtualElementAttributes = mergeAttributes sequence <$> virtualElementAttributes velem
+    }
+  where
+    mergeAttributes :: Sequence f g Attributes -> SBehavior Attributes -> SBehavior Attributes
+    mergeAttributes left right = left <||> right
+
 velemMergeStyle
     :: forall f g m .
        ( Functor m
@@ -116,14 +172,14 @@ velemMergeStyle
     => Sequence f g Style
     -> VirtualElement m
     -> VirtualElement m
-velemMergeStyle seq velem = velem {
-      virtualElementStyle = mergeStyle seq <$> virtualElementStyle velem
+velemMergeStyle sequence velem = velem {
+      virtualElementStyle = mergeStyle sequence <$> virtualElementStyle velem
     }
   where
     mergeStyle :: Sequence f g Style -> SBehavior Style -> SBehavior Style
     mergeStyle left right = left <||> right
 
-type VirtualText m = m JSString
+type VirtualText m = m T.Text
 
 velemTrans
     :: ( Functor m )
@@ -178,6 +234,7 @@ data RenderedText = RenderedText {
     , renderedTextNode :: Text
     }
 
+-- | TODO sanitize it, to eliminate XSS.
 renderText
     :: ( IsDocument document
        , MonadIO n
@@ -185,9 +242,11 @@ renderText
     => document
     -> VirtualText Identity
     -> n RenderedText
-renderText document str = do
-    Just text <- document `createTextNode` (runIdentity str)
-    return (RenderedText (runIdentity str) text)
+renderText document txt = do
+    let sanitized = sanitizeXSS (runIdentity txt)
+    let txtJSString :: JSString = textToJSString sanitized
+    Just text <- document `createTextNode` txtJSString
+    return (RenderedText txtJSString text)
 
 type VirtualNode m = Either (VirtualElement m) (VirtualText m)
 type RenderedNode = Either RenderedVirtualElement RenderedText
@@ -195,7 +254,7 @@ type RenderedNode = Either RenderedVirtualElement RenderedText
 node :: VirtualElement m -> VirtualNode m
 node = Left
 
-text :: m JSString -> VirtualNode m
+text :: m T.Text -> VirtualNode m
 text = Right
 
 renderVirtualNode
@@ -212,7 +271,7 @@ renderedNode = either (toNode . renderedVirtualElement) (toNode . renderedTextNo
 
 virtualElement
     :: ( Applicative m )
-    => m JSString
+    => m T.Text
     -> m (SBehavior Properties)
     -> m (SBehavior Attributes)
     -> m (SBehavior Style)
@@ -231,7 +290,7 @@ renderVirtualElement
     -> VirtualElement Identity
     -> MomentIO RenderedVirtualElement
 renderVirtualElement document velem = do
-    Just el <- document `createElement` (Just (runIdentity (virtualElementTag velem)))
+    Just el <- document `createElement` (Just (textToJSString (runIdentity (virtualElementTag velem))))
     reactimateProperties el (runIdentity (virtualElementProperties velem))
     reactimateAttributes el (runIdentity (virtualElementAttributes velem))
     reactimateStyle el (runIdentity (virtualElementStyle velem))
@@ -364,26 +423,29 @@ reactimateProperties element sequence = do
     currentProperties <- liftIO $ newIORef mempty
     let changeProperties new = do
             current <- readIORef currentProperties
-            let (add, remove) = diffProperties current new
+            let new' = runMapWithPrecedence new
+            let (add, remove) = diffProperties current new'
             removeProperties element remove
             addProperties element add
-            writeIORef currentProperties new
-    sequenceReactimate runIdentity
-                       runIdentity
+            writeIORef currentProperties new'
+    sequenceReactimate (fmap Identity . runIdentity)
+                       (fmap Identity . runIdentity)
+                       (runIdentity)
+                       (runIdentity)
                        (changeProperties <$> sequence)
     return ()
 
-addProperties :: Element -> M.Map JSString JSString -> IO ()
+addProperties :: Element -> M.Map T.Text T.Text -> IO ()
 addProperties element properties = do
-    let propertiesList :: [(JSString, Maybe JSString)]
+    let propertiesList :: [(T.Text , Maybe T.Text)]
         propertiesList = M.foldWithKey (\x y -> (:) (x, Just y)) [] properties
-    forM_ propertiesList (\(x, y) -> setJSProperty element x y)
+    forM_ propertiesList (\(x, y) -> setJSProperty element (textToJSString x) (textToJSString <$> y))
 
-removeProperties :: Element -> M.Map JSString JSString -> IO ()
+removeProperties :: Element -> M.Map T.Text T.Text -> IO ()
 removeProperties element properties = do
-    let propertyNames :: [JSString]
+    let propertyNames :: [T.Text]
         propertyNames = M.keys properties
-    _ :: [Maybe JSString] <- forM propertyNames (removeJSProperty element)
+    _ :: [Maybe JSString] <- forM propertyNames (removeJSProperty element . textToJSString)
     return ()
 
 diffProperties old new = (toAdd, toRemove)
@@ -397,30 +459,33 @@ reactimateStyle element sequence = do
     currentStyle <- liftIO $ newIORef mempty
     let changeStyle new = do
             current <- readIORef currentStyle
-            let (add, remove) = diffStyle current new
+            let new' = runMapWithPrecedence new
+            let (add, remove) = diffStyle current new'
             removeStyle element remove
             addStyle element add
-            writeIORef currentStyle new
-    sequenceReactimate runIdentity
-                       runIdentity
+            writeIORef currentStyle new'
+    sequenceReactimate (fmap Identity . runIdentity)
+                       (fmap Identity . runIdentity)
+                       (runIdentity)
+                       (runIdentity)
                        (changeStyle <$> sequence)
     return ()
 
-addStyle :: Element -> M.Map JSString JSString -> IO ()
+addStyle :: Element -> M.Map T.Text T.Text -> IO ()
 addStyle element style = do
-    let styleList :: [(JSString, Maybe JSString, JSString)]
+    let styleList :: [(T.Text, Maybe T.Text, T.Text)]
         styleList = M.foldWithKey (\x y -> (:) (x, Just y, "")) [] style
     Just css <- getStyle element
-    forM_ styleList (\(x, y, z) -> setProperty css x y z)
+    forM_ styleList (\(x, y, z) -> setProperty css (textToJSString x) (textToJSString <$> y) (textToJSString z))
 
-removeStyle :: Element -> M.Map JSString JSString -> IO ()
+removeStyle :: Element -> M.Map T.Text T.Text -> IO ()
 removeStyle element style = do
-    let styleNames :: [JSString]
+    let styleNames :: [T.Text]
         styleNames = M.keys style
     Just css <- getStyle element
     -- We bind here because we have to give a type signature in order to
     -- disambiguate.
-    _ :: [Maybe JSString] <- forM styleNames (removeProperty css)
+    _ :: [Maybe JSString] <- forM styleNames (removeProperty css . textToJSString)
     return ()
 
 -- | First component is the new style not present in old.
@@ -436,26 +501,29 @@ reactimateAttributes element sequence = do
     currentAttributes <- liftIO $ newIORef mempty
     let changeAttributes new = do
             current <- readIORef currentAttributes
-            let (add, remove) = diffAttributes current new
+            let new' = runMapWithPrecedence new
+            let (add, remove) = diffAttributes current new'
             removeAttributes element remove
             addAttributes element add
-            writeIORef currentAttributes new
-    sequenceReactimate runIdentity
-                       runIdentity
+            writeIORef currentAttributes new'
+    sequenceReactimate (fmap Identity . runIdentity)
+                       (fmap Identity . runIdentity)
+                       (runIdentity)
+                       (runIdentity)
                        (changeAttributes <$> sequence)
     return ()
 
-addAttributes :: Element -> M.Map JSString JSString -> IO ()
+addAttributes :: Element -> M.Map T.Text T.Text -> IO ()
 addAttributes el attrs = do
-    let attrList :: [(JSString, JSString)]
+    let attrList :: [(T.Text, T.Text)]
         attrList = M.foldWithKey (\x y -> (:) (x, y)) [] attrs
-    forM_ attrList (uncurry (setAttribute el))
+    forM_ attrList (\(x, y) -> setAttribute el (textToJSString x) (textToJSString y))
 
-removeAttributes :: Element -> M.Map JSString JSString -> IO ()
+removeAttributes :: Element -> M.Map T.Text T.Text -> IO ()
 removeAttributes el attrs = do
-    let attrNames :: [JSString]
+    let attrNames :: [T.Text]
         attrNames = M.keys attrs
-    forM_ attrNames (removeAttribute el)
+    forM_ attrNames (removeAttribute el . textToJSString)
 
 diffAttributes old new = (toAdd, toRemove)
   where
