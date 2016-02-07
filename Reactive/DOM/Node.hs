@@ -8,7 +8,6 @@ Stability   : experimental
 Portability : non-portable (GHC only)
 -}
 
-{-# LANGUAGE AutoDeriveTypeable #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
@@ -18,12 +17,14 @@ Portability : non-portable (GHC only)
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE StandaloneDeriving #-}
 
 module Reactive.DOM.Node where
 
 import Control.Monad
 import Control.Monad.Trans.Reader
 import Control.Monad.IO.Class
+import Data.List (delete)
 import Data.Semigroup (Semigroup(..))
 import Data.Functor.Identity
 import Data.Unique
@@ -46,46 +47,60 @@ import Reactive.Banana.Combinators
 import Reactive.Banana.Frameworks
 import Reactive.Sequence
 import Unsafe.Coerce
+import System.IO.Unsafe
 
--- We need a semigroup in which we can say
---
---     Immutable JSString
---     Mutable JSString
---
---     Immutable x <> _ = Immutable x
---     Mutable x <> y = y
---     
-data Precedence t where
-    Immutable :: t -> Precedence t
-    Mutable :: t -> Precedence t
+import Debug.Trace
 
-dropPrecedence :: Precedence t -> t
-dropPrecedence term = case term of
-    Immutable t -> t
-    Mutable t -> t
-
-instance Semigroup (Precedence t) where
-    left <> right = case left of
-        Immutable t -> Immutable t
-        Mutable t -> right
-
-newtype MapWithPrecedence k v = MapWithPrecedence {
-      outMapWithPrecedence :: M.Map k (Precedence v)
+newtype IdentifiedMap k v = IdentifiedMap {
+      runIdentifiedMap :: (M.Map k v, Unique)
     }
 
-runMapWithPrecedence :: MapWithPrecedence k v -> M.Map k v
-runMapWithPrecedence = fmap dropPrecedence .outMapWithPrecedence
+instance (Show k, Show v) => Show (IdentifiedMap k v) where
+    show im = let (m, u) = runIdentifiedMap im
+              in  "IdentifiedMap " ++ show (hashUnique u) ++ " : " ++ show m
 
-instance Ord k => Semigroup (MapWithPrecedence k v) where
-    left <> right = MapWithPrecedence (M.unionWith (<>) (outMapWithPrecedence left) (outMapWithPrecedence right))
+{-# NOINLINE makeIdentifiedMap #-}
+makeIdentifiedMap :: M.Map k v -> IdentifiedMap k v
+makeIdentifiedMap m = unsafePerformIO $ do
+    u <- newUnique
+    pure $ IdentifiedMap (m, u)
 
-instance Ord k => Monoid (MapWithPrecedence k v) where
-    mappend = (<>)
-    mempty = MapWithPrecedence mempty
+instance Eq (IdentifiedMap k v) where
+    l == r = snd (runIdentifiedMap l) == snd (runIdentifiedMap r)
 
-type Properties = MapWithPrecedence T.Text T.Text
-type Style = MapWithPrecedence T.Text T.Text
-type Attributes = MapWithPrecedence T.Text T.Text
+instance Ord (IdentifiedMap k v) where
+    l `compare` r = snd (runIdentifiedMap l) `compare` snd (runIdentifiedMap r)
+
+data Action t = Set t | Unset t | NoOp
+
+runAction :: Eq t => Action t -> [t] -> [t]
+runAction action = case action of
+    Set t -> (:) t
+    Unset t -> delete t
+    NoOp -> id
+
+type Properties = IdentifiedMap T.Text T.Text
+type Style = IdentifiedMap T.Text T.Text
+type Attributes = IdentifiedMap T.Text T.Text
+
+{-# NOINLINE makeStyle #-}
+makeStyle :: [(T.Text, T.Text)] -> Style
+makeStyle = makeIdentifiedMap . M.fromList
+
+makeProperties :: [(T.Text, T.Text)] -> Properties
+makeProperties = makeIdentifiedMap . M.fromList
+
+makeAttributes :: [(T.Text, T.Text)] -> Attributes
+makeAttributes = makeIdentifiedMap . M.fromList
+
+computeStyle :: [Style] -> M.Map T.Text T.Text
+computeStyle = foldr (flip (<>)) M.empty . fmap (fst . runIdentifiedMap)
+
+computeProperties :: [Properties] -> M.Map T.Text T.Text
+computeProperties = computeStyle
+
+computeAttributes :: [Attributes] -> M.Map T.Text T.Text
+computeAttributes = computeStyle
 
 type VirtualElementEvents = M.Map DOMString VirtualEvent
 
@@ -111,157 +126,113 @@ data VirtualReactimate where
 
 type NaturalTransformation m n = forall t . m t -> n t
 
-{-
-data Eval m t where
-    Eval :: m t -> (forall s . m s -> s) -> Eval m t
+-- | TBD make an ADT for this with standard HTML5 tags?
+type Tag = T.Text
 
-instance Functor m => Functor (Eval m) where
-    fmap f (Eval x g) = Eval (f <$> x) g
-
-instance Applicative (Eval Identity) where
-    pure x = Eval (pure x) runIdentity
-    (Eval f _) <*> (Eval x _) = Eval (f <*> x) runIdentity
-
-makeEval :: (forall s . m s -> s) -> m t -> Eval m t
-makeEval f x = Eval x f
-
-eval :: Eval m t -> t
-eval (Eval x f) = f x
--}
-
--- | 
-data VirtualElement (m :: * -> *) = VirtualElement {
+-- | Contains all information to describe a DOM node.
+data VirtualElement = VirtualElement {
       virtualElementUnique :: Unique
-    , virtualElementTag :: m T.Text
-    , virtualElementProperties :: m (SBehavior Properties)
-    , virtualElementAttributes :: m (SBehavior  Attributes)
-    , virtualElementStyle :: m (SBehavior Style)
-    , virtualElementChildren :: m (SBehavior [VirtualNode m])
+    , virtualElementTag :: Tag
+    , virtualElementProperties :: Sequence [Properties]
+    , virtualElementAttributes :: Sequence [Attributes]
+    , virtualElementStyle :: Sequence [Style]
+    , virtualElementChildren :: Sequence [VirtualNode]
     , virtualElementEvents :: IORef VirtualElementEvents
     , virtualElementReactimates :: IORef VirtualElementReactimates
     }
 
-instance Eq (VirtualElement m) where
+instance Eq VirtualElement where
     x == y = virtualElementUnique x == virtualElementUnique y
 
-instance Ord (VirtualElement m) where
+instance Ord VirtualElement where
     x `compare` y = virtualElementUnique x `compare` virtualElementUnique y
 
-velemMergeAttributes
-    :: forall f g m .
-       ( Functor m
-       , UnionsTo (Sequence f g) (SBehavior) ~ SBehavior
-       , Unionable f Identity g Identity
-       )
-    => Sequence f g Attributes
-    -> VirtualElement m
-    -> VirtualElement m
-velemMergeAttributes sequence velem = velem {
-      virtualElementAttributes = mergeAttributes sequence <$> virtualElementAttributes velem
+styleVirtualElement
+    :: Sequence (Action Style)
+    -> VirtualElement
+    -> VirtualElement
+styleVirtualElement actions velem = velem {
+      virtualElementStyle = mergeStyle actions (virtualElementStyle velem)
     }
   where
-    mergeAttributes :: Sequence f g Attributes -> SBehavior Attributes -> SBehavior Attributes
-    mergeAttributes left right = left <||> right
+    mergeStyle :: Sequence (Action Style) -> Sequence [Style] -> Sequence [Style]
+    mergeStyle actions seqnc = runAction <$> actions <*> seqnc
 
-velemMergeStyle
-    :: forall f g m .
-       ( Functor m
-       , UnionsTo (Sequence f g) (SBehavior) ~ SBehavior
-       , Unionable f Identity g Identity
-       )
-    => Sequence f g Style
-    -> VirtualElement m
-    -> VirtualElement m
-velemMergeStyle sequence velem = velem {
-      virtualElementStyle = mergeStyle sequence <$> virtualElementStyle velem
+attributesVirtualElement
+    :: Sequence (Action Attributes)
+    -> VirtualElement
+    -> VirtualElement
+attributesVirtualElement actions velem = velem {
+      virtualElementAttributes = mergeAttributes actions (virtualElementAttributes velem)
     }
   where
-    mergeStyle :: Sequence f g Style -> SBehavior Style -> SBehavior Style
-    mergeStyle left right = left <||> right
+    mergeAttributes
+        :: Sequence (Action Attributes)
+        -> Sequence [Attributes]
+        -> Sequence [Attributes]
+    mergeAttributes actions seqnc = runAction <$> actions <*> seqnc
 
-type VirtualText m = m T.Text
-
-velemTrans
-    :: ( Functor m )
-    => NaturalTransformation m n
-    -> VirtualElement m
-    -> VirtualElement n
-velemTrans trans velem = velem {
-      virtualElementTag = trans (virtualElementTag velem)
-    , virtualElementProperties = trans (virtualElementProperties velem)
-    , virtualElementAttributes = trans (virtualElementAttributes velem)
-    , virtualElementStyle = trans (virtualElementStyle velem)
-    , virtualElementChildren = trans ((fmap . fmap . fmap) (vnodeTrans trans) (virtualElementChildren velem))
+propertiesVirtualElement
+    :: Sequence (Action Properties)
+    -> VirtualElement
+    -> VirtualElement
+propertiesVirtualElement actions velem = velem {
+      virtualElementProperties = mergeProperties actions (virtualElementProperties velem)
     }
+  where
+    mergeProperties
+        :: Sequence (Action Properties)
+        -> Sequence [Properties]
+        -> Sequence [Properties]
+    mergeProperties actions seqnc = runAction <$> actions <*> seqnc
 
-vtextTrans
-    :: ( )
-    => NaturalTransformation m n
-    -> VirtualText m
-    -> VirtualText n
-vtextTrans = ($)
-
-vnodeTrans
-    :: ( Functor m )
-    => (forall t . m t -> n t)
-    -> VirtualNode m
-    -> VirtualNode n
-vnodeTrans trans = either (Left . velemTrans trans) (Right . vtextTrans trans)
-
-mapStyle
-     :: Functor m
-     => (Style -> Style)
-     -> VirtualElement m
-     -> VirtualElement m
-mapStyle f velem = velem { virtualElementStyle = (fmap . fmap) f (virtualElementStyle velem) }
+type VirtualText = T.Text
 
 data RenderedVirtualElement = RenderedVirtualElement {
       renderedVirtualElementUnique :: Unique
     , renderedVirtualElement :: Element
     }
 
-renderedFrom :: RenderedVirtualElement -> VirtualElement m -> Bool
+renderedFrom :: RenderedVirtualElement -> VirtualElement -> Bool
 renderedFrom x y = renderedVirtualElementUnique x == virtualElementUnique y
 
-nodeRenderedFrom :: RenderedNode -> VirtualNode Identity -> Bool
+nodeRenderedFrom :: RenderedNode -> VirtualNode -> Bool
 nodeRenderedFrom x y = case (x, y) of
     (Left x', Left y') -> renderedFrom x' y'
     _ -> False
-
 
 data RenderedText = RenderedText {
       renderedTextString :: JSString
     , renderedTextNode :: Text
     }
 
--- | TODO sanitize it, to eliminate XSS.
 renderText
     :: ( IsDocument document
        , MonadIO n
        )
     => document
-    -> VirtualText Identity
+    -> VirtualText
     -> n RenderedText
 renderText document txt = do
-    let sanitized = sanitizeXSS (runIdentity txt)
+    let sanitized = sanitizeXSS txt
     let txtJSString :: JSString = textToJSString sanitized
     Just text <- document `createTextNode` txtJSString
     return (RenderedText txtJSString text)
 
-type VirtualNode m = Either (VirtualElement m) (VirtualText m)
+type VirtualNode = Either VirtualElement VirtualText
 type RenderedNode = Either RenderedVirtualElement RenderedText
 
-node :: VirtualElement m -> VirtualNode m
+node :: VirtualElement -> VirtualNode
 node = Left
 
-text :: m T.Text -> VirtualNode m
+text :: T.Text -> VirtualNode
 text = Right
 
 renderVirtualNode
     :: ( IsDocument document
        )
     => document
-    -> VirtualNode Identity
+    -> VirtualNode
     -> MomentIO RenderedNode
 renderVirtualNode document = either (fmap Left . renderVirtualElement document)
                                     (fmap Right . liftIO . renderText document)
@@ -270,13 +241,12 @@ renderedNode :: RenderedNode -> Node
 renderedNode = either (toNode . renderedVirtualElement) (toNode . renderedTextNode)
 
 virtualElement
-    :: ( Applicative m )
-    => m T.Text
-    -> m (SBehavior Properties)
-    -> m (SBehavior Attributes)
-    -> m (SBehavior Style)
-    -> m (SBehavior [VirtualNode m])
-    -> MomentIO (VirtualElement m)
+    :: T.Text
+    -> Sequence [Properties]
+    -> Sequence [Attributes]
+    -> Sequence [Style]
+    -> Sequence [VirtualNode]
+    -> MomentIO VirtualElement
 virtualElement tagName props attrs style kids = do
     unique <- liftIO $ newUnique
     refEvent <- liftIO $ newIORef M.empty
@@ -287,14 +257,17 @@ renderVirtualElement
     :: ( IsDocument document
        )
     => document
-    -> VirtualElement Identity
+    -> VirtualElement
     -> MomentIO RenderedVirtualElement
 renderVirtualElement document velem = do
-    Just el <- document `createElement` (Just (textToJSString (runIdentity (virtualElementTag velem))))
-    reactimateProperties el (runIdentity (virtualElementProperties velem))
-    reactimateAttributes el (runIdentity (virtualElementAttributes velem))
-    reactimateStyle el (runIdentity (virtualElementStyle velem))
-    reactimateChildren document el (runIdentity (virtualElementChildren velem))
+    Just el <- document `createElement` (Just (textToJSString (virtualElementTag velem)))
+    -- Show the unique identifier of the virtual element in the markup.
+    let uniq = virtualElementUnique velem
+    setAttribute el (textToJSString "virtual_id") (textToJSString (T.pack (show (hashUnique uniq))))
+    reactimateProperties el (virtualElementProperties velem)
+    reactimateAttributes el (virtualElementAttributes velem)
+    reactimateStyle el (virtualElementStyle velem)
+    reactimateChildren document el (virtualElementChildren velem)
     events <- liftIO $ readIORef (virtualElementEvents velem)
     wireVirtualEvents el events
     reactimates <- liftIO $ readIORef (virtualElementReactimates velem)
@@ -318,10 +291,10 @@ wireVirtualEvents el vevents = M.foldWithKey (wireVirtualEvent el) (return ()) v
 
 virtualEvent
     :: IsEvent event
-    => VirtualElement m
+    => VirtualElement
     -> EventName Element event
     -> (Element -> event -> IO t)
-    -> MomentIO (SEvent t)
+    -> MomentIO (Event t)
 virtualEvent velem (EventName eventName) io = do
     events <- liftIO $ readIORef (virtualElementEvents velem)
     case M.lookup eventName events of
@@ -332,7 +305,7 @@ virtualEvent velem (EventName eventName) io = do
                       let nextEvents :: VirtualElementEvents
                           nextEvents = M.insert eventName (VirtualEvent ev io fire) events
                       liftIO $ writeIORef (virtualElementEvents velem) nextEvents
-                      pure (eventToSEvent ev)
+                      pure ev
 
 wireVirtualReactimates
     :: ( )
@@ -346,7 +319,7 @@ wireVirtualReactimates el vreactimates = forM_ vreactimates (wireVirtualReactima
 
 virtualReactimate
     :: ( )
-    => VirtualElement m
+    => VirtualElement
     -> Event event
     -> (Element -> event -> IO ())
     -> MomentIO ()
@@ -365,7 +338,7 @@ reactimateChildren
        )
     => document
     -> parent
-    -> SBehavior [VirtualNode Identity]
+    -> Sequence [VirtualNode]
     -> MomentIO ()
 reactimateChildren document parent children = do
     currentlyRendered <- liftIO $ newIORef []
@@ -375,18 +348,16 @@ reactimateChildren document parent children = do
     -- immediately by sequenceReactimate.
     -- Careful to choose lag' and not lag, as we do want to force the
     -- children event.
-    let delayed = lag' children
-    sequenceExecute (fmap Identity . runIdentity)
-                    (fmap Identity . runIdentity)
-                    (update parent currentlyRendered <$> delayed)
+    let delayed = lag children
+    sequenceCommute (update parent currentlyRendered <$> delayed)
     return ()
   where
     -- A stupid, minimally efficient diff: remove all old, add all new.
     -- We do one check: if everything in the list is JavaScript equal to
     -- its counterpart in the other, we can do nothing.
     diff :: [RenderedNode]
-         -> [VirtualNode Identity]
-         -> ([RenderedNode], [VirtualNode Identity])
+         -> [VirtualNode]
+         -> ([RenderedNode], [VirtualNode])
     diff old new =
         if getAll (mconcat (All (length old == length new) : zipWith (\x y -> All (nodeRenderedFrom x y)) old new))
         then ([], [])
@@ -395,7 +366,7 @@ reactimateChildren document parent children = do
     update
         :: parent
         -> IORef [RenderedNode]
-        -> [VirtualNode Identity]
+        -> [VirtualNode]
         -> MomentIO ()
     update parent current new = do
         currentRendered <- liftIO $ readIORef current
@@ -418,21 +389,19 @@ setJSProperty el x y = js_setJSProperty el x (maybeToNullable y)
 removeJSProperty :: Element -> JSString -> IO (Maybe JSString)
 removeJSProperty el x = nullableToMaybe <$> js_removeJSProperty el x
 
-reactimateProperties :: Element -> SBehavior Properties -> MomentIO ()
+reactimateProperties :: Element -> Sequence [Properties] -> MomentIO ()
 reactimateProperties element sequence = do
     currentProperties <- liftIO $ newIORef mempty
-    let changeProperties new = do
+    let changeProperties :: [Properties] -> IO ()
+        changeProperties new = do
+            let props :: M.Map T.Text T.Text
+                props = computeProperties new
             current <- readIORef currentProperties
-            let new' = runMapWithPrecedence new
-            let (add, remove) = diffProperties current new'
+            let (add, remove) = diffProperties current props
             removeProperties element remove
             addProperties element add
-            writeIORef currentProperties new'
-    sequenceReactimate (fmap Identity . runIdentity)
-                       (fmap Identity . runIdentity)
-                       (runIdentity)
-                       (runIdentity)
-                       (changeProperties <$> sequence)
+            writeIORef currentProperties props
+    sequenceReactimate (changeProperties <$> sequence)
     return ()
 
 addProperties :: Element -> M.Map T.Text T.Text -> IO ()
@@ -454,21 +423,17 @@ diffProperties old new = (toAdd, toRemove)
     toRemove = M.differenceWith justWhenDifferent old new
     justWhenDifferent x y = if x /= y then Just x else Nothing
 
-reactimateStyle :: Element -> SBehavior Style -> MomentIO ()
+reactimateStyle :: Element -> Sequence [Style] -> MomentIO ()
 reactimateStyle element sequence = do
     currentStyle <- liftIO $ newIORef mempty
     let changeStyle new = do
+            let styl = computeStyle new
             current <- readIORef currentStyle
-            let new' = runMapWithPrecedence new
-            let (add, remove) = diffStyle current new'
+            let (add, remove) = diffStyle current styl
             removeStyle element remove
             addStyle element add
-            writeIORef currentStyle new'
-    sequenceReactimate (fmap Identity . runIdentity)
-                       (fmap Identity . runIdentity)
-                       (runIdentity)
-                       (runIdentity)
-                       (changeStyle <$> sequence)
+            writeIORef currentStyle styl
+    sequenceReactimate (changeStyle <$> sequence)
     return ()
 
 addStyle :: Element -> M.Map T.Text T.Text -> IO ()
@@ -496,21 +461,17 @@ diffStyle oldStyle newStyle = (toAdd, toRemove)
     toRemove = M.differenceWith justWhenDifferent oldStyle newStyle
     justWhenDifferent x y = if x /= y then Just x else Nothing
 
-reactimateAttributes :: Element -> SBehavior Attributes -> MomentIO ()
+reactimateAttributes :: Element -> Sequence [Attributes] -> MomentIO ()
 reactimateAttributes element sequence = do
     currentAttributes <- liftIO $ newIORef mempty
     let changeAttributes new = do
+            let attrs = computeAttributes new
             current <- readIORef currentAttributes
-            let new' = runMapWithPrecedence new
-            let (add, remove) = diffAttributes current new'
+            let (add, remove) = diffAttributes current attrs
             removeAttributes element remove
             addAttributes element add
-            writeIORef currentAttributes new'
-    sequenceReactimate (fmap Identity . runIdentity)
-                       (fmap Identity . runIdentity)
-                       (runIdentity)
-                       (runIdentity)
-                       (changeAttributes <$> sequence)
+            writeIORef currentAttributes attrs
+    sequenceReactimate (changeAttributes <$> sequence)
     return ()
 
 addAttributes :: Element -> M.Map T.Text T.Text -> IO ()
@@ -538,7 +499,7 @@ maybeRender
     => document
     -> parent
     -> Maybe RenderedVirtualElement
-    -> VirtualElement Identity
+    -> VirtualElement
     -> MomentIO RenderedVirtualElement
 maybeRender document parent maybeRendered velem = case maybeRendered of
     Nothing -> render document parent velem
@@ -553,7 +514,7 @@ render
        )
     => document
     -> parent
-    -> VirtualElement Identity
+    -> VirtualElement
     -> MomentIO RenderedVirtualElement
 render document parent vnode = do
     vrendered <- renderVirtualElement document vnode

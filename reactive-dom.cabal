@@ -17,15 +17,11 @@ cabal-version:       >=1.10
 
 library
   exposed-modules:     Reactive.DOM.Node
-                     , Reactive.DOM.Component
                      , Reactive.DOM.Flow
                      , Reactive.DOM.Window
                      , Reactive.DOM.XHR
-                     , Reactive.DOM.Component.Label
-                     , Reactive.DOM.Component.Button
-                     , Reactive.DOM.Component.TextInput
-                     , Reactive.DOM.Component.PasswordInput
-                     , Reactive.DOM.Component.Wait
+                     , Reactive.DOM.Geolocation
+                     , Reactive.DOM.Widget
 
   -- other-modules:       
   other-extensions:    AutoDeriveTypeable

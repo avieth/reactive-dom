@@ -320,6 +320,41 @@ instance {-# OVERLAPs #-}
             (out, velem) <- makeComponentSum cs (Proxy :: Proxy (IsProduct cs)) is
             pure (Sum (Right out), velem)
 
+-- Can't we make this stuff simpler?
+--
+--   knot :: Component s t -> (t -> s) -> Component () t
+--   Or
+--   knot :: (t -> Component t) -> Component t
+--
+--   data Component t = Component {
+--         runComponent :: MomentIO (t, VirtualElement)
+--       }
+--
+--   knot :: (t -> Component t) -> Component t
+--   knot rec = Component $ mdo
+--       (t, velem) <- runComponent (rec t)
+--       pure (t, velem)
+--
+-- Issue with this one: no types to distinguish components!
+--
+--   label :: SBehavior Text -> Component ()
+--   label stext = Component $ do
+--       velem <- ...
+--       pure ((), velem)
+--
+-- Could throw on a phantom type in front of @t@.
+--
+--   list :: SBehavior [Component t] -> Component [t]
+--   list scomponents = Component $ do
+--       let subs :: SBehavior (MomentIO [(t, VirtualElement)])
+--           subs = fmap (traverse runComponent) scomponents
+--       -- commuted :: SBheavior [(t, VirtualElement)]
+--       commuted <- scommute subs
+--       -- (fmap . fmap) fst commuted :: SBehavior [t]
+--       -- (fmap . fmap) snd commuted :: SBehavior [VirtualElement]
+--       velem <- ...
+--       pure (ts, velem)
+
 -- | Indicates that a subcomponents input should be defined recursively from
 --   its output.
 data Knot sub where

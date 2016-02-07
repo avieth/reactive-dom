@@ -14,38 +14,56 @@ Portability : non-portable (GHC only)
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE StandaloneDeriving #-}
 
-module Reactive.DOM.XHR where
+module Reactive.DOM.XHR (
+
+      xhr
+    , xhrImmediate'
+    , xhrImmediate
+
+    , XHRURL
+    , XHRStatus
+    , XHRHeaders
+    , XHRMethod(..)
+    , XHRRequest(..)
+    , XHRResponse(..)
+
+    ) where
 
 import Control.Arrow
-import Control.Monad (forM_)
+import Control.Monad (forM_, when)
 import Control.Monad.Trans.Reader (ask)
 import Control.Monad.IO.Class
 import Control.Concurrent.Async
 import Data.Functor.Identity
+import Data.Functor.Compose
 import Data.IORef
 import Data.Unique
 import Data.Monoid
 import Data.Bifunctor
 import Data.Bifoldable
 import Data.Bitraversable
-import Data.EitherBoth
 import qualified Data.Map as M
+import qualified Data.Text as T
+import qualified Data.Text.Lazy as TL
+import Data.JSString.Text
 import GHCJS.Types
 import GHCJS.DOM.Types
 import GHCJS.DOM.Element as Element
 import GHCJS.DOM.XMLHttpRequest as XHR
-import GHCJS.DOM.JSFFI.XMLHttpRequest as XHR hiding (send)
+import GHCJS.DOM.JSFFI.XMLHttpRequest as XHR hiding (send, cancel)
 import GHCJS.DOM.EventM
 import Reactive.Banana.Combinators as Banana
 import Reactive.Banana.Frameworks
 import Reactive.Sequence
+import Debug.Trace
 
-type XHRURL = JSString
+type XHRURL = T.Text
 
 type XHRStatus = Int
 
-type XHRHeaders = [(JSString, JSString)]
+type XHRHeaders = [(T.Text, T.Text)]
 
 data XHRMethod = GET | PUT | POST | DELETE
 
@@ -60,97 +78,73 @@ data XHRRequest = XHRRequest {
       xhrRequestMethod :: XHRMethod
     , xhrRequestURL :: XHRURL
     , xhrRequestHeaders :: XHRHeaders
-    -- For now we just take a text body. Good enough for using JSON endpoints.
-    , xhrRequestBody :: Maybe JSString
+    , xhrRequestBody :: Maybe TL.Text
+    , xhrRequestAuth :: Maybe (T.Text, T.Text)
     }
 
--- You get only the status code and the response text.
-data XHRResponse body = XHRResponse {
+deriving instance Show XHRRequest
+
+data XHRResponse = XHRResponse {
       xhrResponseStatus :: XHRStatus
-    , xhrResponseBody :: Maybe body
+    , xhrResponseHeaders :: XHRHeaders
+    , xhrResponseBody :: Maybe TL.Text
     }
 
--- | By judiciously choosing the type parameters @f@ and @g@, you can spawn
---   an XHR immediately (@f ~ Identity@).
-xhr
-    :: forall f g body .
-       ( FromJSString body
-       ,   SwitchesTo (Sequence f g (SEvent (XHRResponse body)))
-         ~ SEvent (XHRResponse body)
-         -- The above should always be true.
-       , Switchable f (Const ()) g Identity
-       , Unionable f (Const ()) g Identity
-       )
-    => (forall s . f (MomentIO s) -> MomentIO (f s))
-    -> (forall s . g (MomentIO s) -> MomentIO (g s))
-    -> Sequence f g XHRRequest
-    -> (UnionsTo (Sequence f g) SEvent) (EitherBoth () (XHRResponse body))
-xhr commuteF commuteG sequence =
-    let -- Every time the sequence changes it means to make a request.
-        -- We derive @pendings@ so that a OneLeft or Both means that a request
-        -- was made.
-        -- TODO would be nice to give a token instead of () so that the program
-        -- could use it to cancel an in-flight request.
-        pendings :: Sequence f g (EitherBoth () (XHRResponse body))
-        pendings = (const (OneLeft ())) <$> sequence
+deriving instance Show XHRResponse
 
-        -- Every non-Nothing hit of the sequence spawns a request.
-        spawns :: Sequence f g (MomentIO (SEvent (XHRResponse body), XMLHttpRequest))
-        spawns = makeXHRFromRequest <$> sequence
+xhr :: Banana.Event XHRRequest -> Compose MomentIO Banana.Event XHRResponse
+xhr requests = Compose $ do
+    let spawns :: Banana.Event (MomentIO (Banana.Event XHRResponse, XMLHttpRequest))
+        spawns = makeXHRFromRequest <$> requests
+    commuted <- execute spawns
+    let events = switchE (fst <$> commuted)
+    inFlight <- stepper Nothing (Just . snd <$> commuted)
+    let cancelInFlight :: Maybe XMLHttpRequest -> IO ()
+        cancelInFlight in_xhr = case in_xhr of
+            Nothing -> pure ()
+            Just in_flight -> do
+                readyState <- getReadyState in_flight
+                if readyState /= 4
+                then XHR.abort in_flight
+                else pure ()
+    -- Every time commuted fires, we check the in-flight XHR and cancel it if
+    -- it's not in ready state 4. Careful to choose commuted rather than
+    -- events, as the latter is the actual response from an XHR.
+    reactimate (cancelInFlight <$> (inFlight <@ commuted))
+    pure events
 
-    -- We commute the @spawns@ sequence and discard the XHR, since we don't
-    -- offer a way to cancel at present.
-        responseSequence :: Sequence f g (SEvent (XHRResponse body))
-        responseSequence = fmap fst (sequenceCommute commuteF commuteG spawns)
+-- | Like XHR but send it off immediately. We use Identity for uniformity:
+--   both xhrImmediate' and xhr take the XHRRequest inside some functor.
+xhrImmediate' :: Identity XHRRequest -> MomentIO (Banana.Event XHRResponse, XMLHttpRequest)
+xhrImmediate' request = makeXHRFromRequest (runIdentity request)
 
-    -- Now to recover our responses. We switch the @responseSequence@,
-    -- and we're careful to disambiguate by choosing *later* responses,
-    -- as that's the nature of this function: if you make a new request
-    -- while another is in flight, you will never hear the response of the
-    -- old one.
-        switched :: SEvent (XHRResponse body)
-        switched = switch (flip const) responseSequence
-
-        responses :: SEvent (EitherBoth () (XHRResponse body))
-        responses = OneRight <$> switched
-
-        unioner left right = case (left, right) of
-            (OneLeft x, OneRight y) -> (Both x y)
-            -- Other cases are in fact impossible.
-
-    in  sequenceUnion' unioner pendings responses
-
--- Some tests to check that the types are computed well.
--- If you give an SBehavior as input, you get an SBehavior as output
--- (immediately there is a "request in flight" event (OneLeft ()))
--- If you give an SEvent as input, you get an SEvent as output.
-test1 :: SBehavior (EitherBoth () (XHRResponse JSString))
-test1 = let q = undefined :: SBehavior XHRRequest
-        in  xhr (fmap Identity . runIdentity) (fmap Identity . runIdentity) q
-
-test2 :: SEvent (EitherBoth () (XHRResponse JSString))
-test2 = let q = undefined :: SEvent XHRRequest
-        in  xhr (const (pure (Const ()))) (fmap Identity . runIdentity) q
+xhrImmediate :: Identity XHRRequest -> Compose MomentIO Banana.Event XHRResponse
+xhrImmediate = Compose . fmap fst . xhrImmediate'
 
 -- | Make and send an XHR. You get the event giving the response, and the
---   XHR itself, in case perhaps you want to cancel it or something.
+--   XHR itself, in case perhaps you want to cancel it.
 makeXHRFromRequest
-    :: FromJSString body
-    => XHRRequest
-    -> MomentIO (SEvent (XHRResponse body), XMLHttpRequest)
+    :: XHRRequest
+    -> MomentIO (Banana.Event XHRResponse, XMLHttpRequest)
 makeXHRFromRequest xhrRequest = do
     xhrObject <- newXMLHttpRequest
+    let reqUrl = textToJSString (xhrRequestURL xhrRequest)
+    let reqHeaders = (\(x, y) -> (textToJSString x, textToJSString y)) <$> (xhrRequestHeaders xhrRequest)
+    let maybeAuth :: Maybe (T.Text, T.Text)
+        maybeAuth = xhrRequestAuth xhrRequest
+    let username :: Maybe JSString
+        username = textToJSString . fst <$> maybeAuth
+    let password :: Maybe JSString
+        password = textToJSString . snd <$> maybeAuth
     open xhrObject (show (xhrRequestMethod xhrRequest))
-                   (xhrRequestURL xhrRequest)
+                   (reqUrl)
                    (Just True) -- True meaning do not block
-                   (Nothing :: Maybe JSString)
-                   (Nothing :: Maybe JSString)
-    forM_ (xhrRequestHeaders xhrRequest) (uncurry (setRequestHeader xhrObject))
-    -- Seems we must actually write out the concurrency here in Haskell. Even
-    -- though our XHR is asynchronous, it blocks a Haskell thread.
+                   (username)
+                   (password)
+    forM_ reqHeaders (uncurry (setRequestHeader xhrObject))
     thread <- case xhrRequestBody xhrRequest of
         Nothing -> liftIO (async (send xhrObject))
-        Just str -> liftIO (async (sendString xhrObject str))
+        Just txt -> liftIO (async (sendString xhrObject (lazyTextToJSString txt)))
     (ev, fire) <- newEvent
     -- When the state changes to 4, we build an XHRResponse and fire the event.
     liftIO $ on xhrObject readyStateChange $ do
@@ -158,6 +152,29 @@ makeXHRFromRequest xhrRequest = do
                  if readyState /= 4
                  then return ()
                  else do status <- getStatus xhrObject
-                         responseText <- getResponseText xhrObject
-                         liftIO $ fire (XHRResponse (fromIntegral status) responseText)
-    return (eventToSEvent ev, xhrObject)
+                         -- getAllResponseHeaders just gives a string; we've got
+                         -- to separate them into a list. MDN says they're
+                         -- to be separated by CRLF.
+                         Just responseHeaders <- getAllResponseHeaders xhrObject
+                         let headers = marshallResponseHeaders responseHeaders
+                         when (not (corsPreflight headers)) $ do
+                             responseText <- getResponseText xhrObject
+                             let response = XHRResponse (fromIntegral status)
+                                                        (headers)
+                                                        (lazyTextFromJSString <$> responseText)
+                             liftIO $ fire response
+    return (ev, xhrObject)
+
+corsPreflight :: [(T.Text, T.Text)] -> Bool
+corsPreflight = elem (T.toCaseFold "Access-Control-Allow-Origin") . fmap (T.toCaseFold . fst)
+
+marshallResponseHeaders :: T.Text -> [(T.Text, T.Text)]
+marshallResponseHeaders text =
+    let brokenCRLF = T.splitOn "\r\n" text
+        breakOnColon = \t -> let (key, value) = T.breakOn ":" t
+                                 -- tail is partial, so we have to do this
+                                 -- crude bool test.
+                             in  if T.null value
+                                 then (key, value)
+                                 else (key, T.tail value)
+    in  breakOnColon <$> brokenCRLF

@@ -6,6 +6,8 @@ Licence     : BSD3
 Maintainer  : aovieth@gmail.com
 Stability   : experimental
 Portability : non-portable (GHC only)
+
+DEPRECATED
 -}
 
 {-# LANGUAGE AutoDeriveTypeable #-}
