@@ -94,7 +94,7 @@ makeAttributes :: [(T.Text, T.Text)] -> Attributes
 makeAttributes = makeIdentifiedMap . M.fromList
 
 computeStyle :: [Style] -> M.Map T.Text T.Text
-computeStyle = foldr (flip (<>)) M.empty . fmap (fst . runIdentifiedMap)
+computeStyle = foldl (<>) M.empty . fmap (fst . runIdentifiedMap)
 
 computeProperties :: [Properties] -> M.Map T.Text T.Text
 computeProperties = computeStyle
@@ -139,6 +139,11 @@ data VirtualElement = VirtualElement {
     , virtualElementChildren :: Sequence [VirtualNode]
     , virtualElementEvents :: IORef VirtualElementEvents
     , virtualElementReactimates :: IORef VirtualElementReactimates
+    -- Sometimes we need to do some effectful work on a proper DOM element in
+    -- order to get what we want. For instance, using external libraries like
+    -- Leaflet (map visualizations). We throw in the document for good
+    -- measure.
+    , virtualElementPostprocess :: forall document . IsDocument document => document -> Element -> MomentIO ()
     }
 
 instance Eq VirtualElement where
@@ -251,7 +256,7 @@ virtualElement tagName props attrs style kids = do
     unique <- liftIO $ newUnique
     refEvent <- liftIO $ newIORef M.empty
     refReactimate <- liftIO $ newIORef []
-    return (VirtualElement unique tagName props attrs style kids refEvent refReactimate)
+    return (VirtualElement unique tagName props attrs style kids refEvent refReactimate (const (const (pure ()))))
 
 renderVirtualElement
     :: ( IsDocument document
@@ -272,6 +277,7 @@ renderVirtualElement document velem = do
     wireVirtualEvents el events
     reactimates <- liftIO $ readIORef (virtualElementReactimates velem)
     wireVirtualReactimates el reactimates
+    _ <- virtualElementPostprocess velem document el
     return (RenderedVirtualElement (virtualElementUnique velem) el)
 
 wireVirtualEvents
