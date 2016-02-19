@@ -17,6 +17,7 @@ import Reactive.Banana.Frameworks
 import Reactive.DOM.Node
 import Reactive.DOM.Widget
 import Examples.Counter
+import Examples.Simple
 
 main :: IO ()
 main = runWebGUI $ \webView -> do
@@ -30,6 +31,11 @@ main = runWebGUI $ \webView -> do
             (ev, velem) <- runWidget <$> counter 0
             _ <- render document body velem
             reactimate (Prelude.print <$> ev)
+
+            (ev', velem') <- runWidget <$> ourInputBox
+            _ <- render document body velem'
+            reactimate (Prelude.print <$> ev')
+
             pure ()
 
     network <- compile networkDescription

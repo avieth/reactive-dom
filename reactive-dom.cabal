@@ -22,6 +22,7 @@ library
                      , Reactive.DOM.XHR
                      , Reactive.DOM.Geolocation
                      , Reactive.DOM.Widget
+                     , Reactive.DOM.WebApp
 
   -- other-modules:       
   other-extensions:    AutoDeriveTypeable
@@ -46,6 +47,8 @@ library
                      , algebraic-data >= 0.1.0.0 && < 0.2.0.0
                      , xss-sanitize >= 0.3.0.0 && < 0.4.0.0
                      , text
+                     , arrows
+                     , http-api-data
 
   -- hs-source-dirs:      
   default-language:    Haskell2010
