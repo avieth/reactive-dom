@@ -399,6 +399,16 @@ flowSequence flow k s = do
 
 -}
 
+splitEvent :: forall t r . Event (Either t (r, Event t)) -> (Event r, Event t)
+splitEvent ev =
+    let lefts :: Event t
+        lefts = filterJust (either Just (const Nothing) <$> ev)
+        rights :: Event t
+        rights = switchE (filterJust (either (const Nothing) (Just . snd) <$> ev))
+        rs :: Event r
+        rs = filterJust (either (const Nothing) (Just . fst) <$> ev)
+    in  (rs, unionWith const lefts rights)
+
 -- | Since a Flow does not necessarily contain any Widgets, the general
 --   run flow may give back a value (Left). Otherwise (Right), you get a
 --   sequence of Widgets, and an Event which fires when the Flow is complete.
@@ -409,23 +419,20 @@ runFlowGeneral
     -> MomentIO (Either t (Sequence (Widget o), Event t))
 runFlowGeneral flow = case flow of
     FlowApp -> \(flow', s) -> runFlowGeneral flow' s
-    FlowCompose left right -> \s -> do
+    FlowCompose (left :: Flow o u t) (right :: Flow o s u) -> \s -> do
         right' <- runFlowGeneral right s
         case right' of
             Left t -> runFlowGeneral left t
             Right (seqnc, ev) -> do
-                let next = runFlowGeneral left <$> ev
-                executed <- execute next
-                -- Event (Either t (Sequence (Widget o), Event t))
-                -- _______________________________________________
-                -- (Sequence (Widget o), Event t)
-                let lefts = filterJust (either Just (const Nothing) <$> executed)
-                let rights = filterJust (either (const Nothing) Just <$> executed)
-                let switchedRights = switchE (snd <$> rights)
-                let unioned = unionWith const lefts switchedRights
-                let otherSeqncs = fst <$> rights
+                let next :: Event (MomentIO (Either t (Sequence (Widget o), Event t)))
+                    next = runFlowGeneral left <$> ev
+                executed :: Event (Either t (Sequence (Widget o), Event t))
+                    <- execute next
+                let split :: (Event (Sequence (Widget o)), Event t)
+                    split = splitEvent executed
+                let otherSeqncs = fst split
                 let finalSeqnc = sequenceSwitch (seqnc |> otherSeqncs)
-                pure $ Right (finalSeqnc, unioned)
+                pure $ Right (finalSeqnc, snd split)
     FlowFirst subFlow -> \(s, c) -> do
         out <- runFlowGeneral subFlow s
         pure $ case out of
@@ -463,7 +470,6 @@ runFlowGeneral flow = case flow of
                 let widgetSequence :: Sequence (Sequence (Widget o))
                     widgetSequence = seqnc |> (fst <$> filterJust (either (const Nothing) Just <$> rest))
                 pure $ Right (sequenceSwitch widgetSequence, nextEvent)
-                
     Flow mk -> \s -> case mk s of
         Left mkT -> Left <$> mkT
         Right mkW -> do
