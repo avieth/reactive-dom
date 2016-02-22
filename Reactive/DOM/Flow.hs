@@ -29,6 +29,7 @@ module Reactive.DOM.Flow (
     , widgetFlow1
     , flowMap
     , alterFlow
+    , alterFlowUniform
     , alterFlow'
     , CompleteFlow
     , runFlow
@@ -92,10 +93,8 @@ instance ArrowChoice (Flow o) where
 instance ArrowApply (Flow o) where
     app = FlowApp
 
--- TODO get rid of widgetFlow1 and use this only.
--- Also change to use this signature:
--- widgetFlow :: (s -> WidgetConstructor (o, Event t)) -> Flow o s t
-widgetFlow = widgetFlow1
+widgetFlow :: (s -> WidgetConstructor (o, Event t)) -> Flow o s t
+widgetFlow mkW = Flow $ Right . mkW
 
 -- | Make a Flow which shows one Widget.
 widgetFlow1 :: (s -> MomentIO (Widget o, Event t)) -> Flow o s t
@@ -244,6 +243,23 @@ alterFlow' fwidget fflow flow =
     in  proc s -> do
             out <- altered -< Right s
             returnA -< either id id out
+
+-- | Like alterFlow but whenever a Left event comes, one particular flow
+--   is run, with no chance to use the continuation Flow.
+alterFlowUniform
+    :: forall o s t u final.
+       (  forall t .
+          WidgetConstructor (o, Event t)
+       -> WidgetConstructor (o, Event (Either u t))
+       )
+    -> Flow o u t
+    -> Flow o s t
+    -> Flow o s t
+alterFlowUniform fwidget fflow flow =
+    arr Right >>> alterFlow fwidget fflow' flow >>> arr (either id id)
+  where
+    fflow' :: forall s t' . Flow o s t' -> Flow o (u, s) (Either t t')
+    fflow' _ = arr fst >>> fflow >>> arr Left
 
 {-
 newtype NextComponent o = NextComponent {
@@ -484,8 +500,8 @@ runFlow
     -> s 
     -> WidgetConstructor (Sequence o)
 runFlow flow s = do
-    -- This pattern is exhaustive; Left Void cannot be constructed.
-    Right (widgets, mustBeNever) <- runFlowGeneral flow s
+    x <- runFlowGeneral flow s
+    let (widgets, mustBeNever) = either absurd id x
     let seqnc = runWidget <$> widgets
     let outs = fst <$> seqnc
     let velems = snd <$> seqnc
