@@ -10,6 +10,8 @@ That's subject to one restriction: there is an
 with weak references in ghcjs, but it is resolved in
 [this branch](https://github.com/alios/shims/tree/fix-reactive-banana).
 
+**What follows in this README is out of date!** Will update it soon.
+
 Here's a preview (full source in [Examples/Counter](./Examples/Counter.hs):
 
 ```Haskell
