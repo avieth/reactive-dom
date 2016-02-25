@@ -22,8 +22,6 @@ import Reactive.Banana.Frameworks
 import Reactive.Sequence
 import Reactive.DOM.Node
 import Reactive.DOM.Flow
---import Examples.Counter
---import Examples.Simple
 import Data.Functor.Identity
 import Data.Foldable
 
@@ -43,6 +41,8 @@ main = runWebGUI $ \webView -> do
     let networkDescription :: MomentIO ()
         networkDescription = do
 
+            -- The first parameter, One, constrains the form of the children of
+            -- this widget: there will always be precisely one.
             let button :: Widget One (Event ())
                 button = knot $ \(~clickEvent) ->
                     tag "button" >>>= \() ->
@@ -95,6 +95,8 @@ main = runWebGUI $ \webView -> do
             (_, c'') <- render document body elem2
             reactimate (Prelude.print <$> c'')
 
+            -- An example of a flow: click the button, and 2 buttons appear.
+            -- Click either of those, and we go back to the start.
             let flow1 :: Flow () () Void
                 flow1 = proc () -> do
                             () <- widgetFlow' button -< ()
