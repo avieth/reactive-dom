@@ -21,8 +21,11 @@ library
                      , Reactive.DOM.Window
                      , Reactive.DOM.XHR
                      , Reactive.DOM.Geolocation
-                     , Reactive.DOM.Widget
                      , Reactive.DOM.WebApp
+
+  other-modules        Reactive.DOM.Edit
+                     , Reactive.DOM.Internal.Node
+                     , Reactive.DOM.Internal.Flow
 
   -- other-modules:       
   other-extensions:    AutoDeriveTypeable
