@@ -39,12 +39,19 @@ module Reactive.DOM.Node (
     , Submit(..)
     , Input(..)
     , Scroll(..)
+    , ScrollData(..)
     , widget
     , text
-    , children
+    , widgetCommute
+    , childrenSet
+    , childrenReact
+    , ChildBuilder
+    , childBuilder
+    , buildChild
 
     , Element
     , Document
+    , ElementSchemaChild
     , makeStyle
     , makeProperties
     , makeAttributes
@@ -54,6 +61,14 @@ module Reactive.DOM.Node (
     , Attributes
     , Tag
 
+    , Mutation
+    , Automutation
+    , ChildrenMutation
+
+    , module Reactive.DOM.Children.Cardinality
+
     ) where
 
 import Reactive.DOM.Internal.Node
+import Reactive.DOM.Internal.Mutation
+import Reactive.DOM.Children.Cardinality

@@ -26,7 +26,6 @@ import Control.Applicative
 import Control.Category
 import Control.Arrow
 import Data.Void
-import Data.Functor.Identity
 import Data.Functor.Compose
 import Data.Monoid (mempty)
 import Data.Algebraic.Index
@@ -36,12 +35,13 @@ import Reactive.Banana.Combinators
 import Reactive.Banana.Frameworks
 import Reactive.Sequence
 import Reactive.DOM.Internal.Node
+import Reactive.DOM.Children.Cardinality
 
 -- | Description of a user interface flow: taking an s, producing a t, with
 --   a side-channel producing an o.
 data Flow o s t where
     FlowMoment :: (s -> MomentIO t) -> Flow o s t
-    FlowWidget :: Foldable f => (s -> Widget f (o, Event t)) -> Flow o s t
+    FlowWidget :: (s -> Widget f (o, Event t)) -> Flow o s t
     -- | A time-varying Flow. The Behavior must be derived from the Event
     --   via stepper.
     FlowVarying :: (Behavior (Flow o s t), Event (Flow o s t)) -> Flow o s t
@@ -89,10 +89,10 @@ varyingFlow seqnc = do
     b <- stepper first rest
     pure $ FlowVarying (b, rest)
 
-widgetFlow :: Foldable f => (s -> Widget f (o, Event t)) -> Flow o s t
+widgetFlow :: (s -> Widget f (o, Event t)) -> Flow o s t
 widgetFlow = FlowWidget
 
-widgetFlow' :: Foldable f => Widget f (Event t) -> Flow o o t
+widgetFlow' :: Widget f (Event t) -> Flow o o t
 widgetFlow' mk = FlowWidget $ \o -> mk >>>= \ev -> ixpure (o, ev)
 
 flowMap :: (o -> o') -> Flow o s t -> Flow o' s t
@@ -308,14 +308,16 @@ runFlow
     :: forall o s .
        Flow o s Void
     -> s 
-    -> Widget Identity (Sequence o)
+    -> Widget (Cardinality One) (Sequence o)
 runFlow flow s =
     getDocument >>>= \document ->
     momentIO (runFlowGeneral document flow s) >>>= \x ->
     let (seqnc, mustBeNever) = either absurd id x
-        elems :: Sequence (Identity ElementSchemaChild)
-        elems = Identity . Left . fst <$> seqnc
+        elems :: Sequence ElementSchemaChild
+        elems = Left . fst <$> seqnc
         outs :: Sequence o
         outs = snd <$> seqnc
-    in  children (const elems) >>>= \_ ->
+    in  momentIO (runSequence elems) >>>= \(firstChild, evChild) ->
+        childrenSet (cardinality (VCons firstChild VNil)) (const id) >>>= \_ ->
+        childrenReact ((\c -> cardinalitySet ix1 (const c)) <$> evChild) >>>= \_ ->
         ixpure outs

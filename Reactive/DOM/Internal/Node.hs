@@ -24,40 +24,33 @@ Portability : non-portable (GHC only)
 
 module Reactive.DOM.Internal.Node where
 
+import Prelude hiding ((.), id)
+import Control.Category
 import Control.Monad
-import Control.Monad.Fix
-import Control.Monad.Trans.Class (lift)
 import Control.Monad.IO.Class
 import Data.List (delete)
 import Data.Semigroup (Semigroup(..))
-import Data.Functor.Compose
-import Data.Functor.Identity
-import Data.Profunctor
-import Data.Foldable
 import Data.Unique
 import qualified Data.Map as M
 import Data.IORef
-import Data.Monoid (All(..), Monoid, mempty, mappend, Endo(..), Dual(..))
 import qualified Data.Text as T
 import Data.JSString.Text
 import Text.HTML.SanitizeXSS (sanitizeXSS)
 import GHCJS.Types
 import GHCJS.DOM.Types hiding (Event, Element, Document)
 import qualified GHCJS.DOM.Types as DOM.Types
-import GHCJS.DOM.Element hiding (Element(..))
+import GHCJS.DOM.Element hiding (Element)
 import qualified GHCJS.DOM.Element as Element
 import GHCJS.DOM.Node as Node
 import GHCJS.DOM.Document hiding (Document)
-import qualified GHCJS.DOM.Document as Document
 import GHCJS.DOM.EventM
 import GHCJS.DOM.CSSStyleDeclaration
-import GHCJS.DOM.EventTargetClosures
-import GHCJS.DOM.HTMLInputElement (castToHTMLInputElement, getValue)
+import GHCJS.DOM.HTMLInputElement (getValue)
 import Reactive.Banana.Combinators
 import Reactive.Banana.Frameworks
 import Reactive.Sequence
-import Reactive.DOM.Edit
-import Unsafe.Coerce
+import Reactive.DOM.Internal.Mutation
+import Reactive.DOM.Children.Cardinality
 import System.IO.Unsafe
 
 type Document = DOM.Types.Document
@@ -119,63 +112,20 @@ type Tag = T.Text
 
 type ElementSchemaChild = Either Element Text
 
-newtype ChildrenContainer f = ChildrenContainer {
-      runChildrenContainer :: f ElementSchemaChild
-    }
-
-transChildrenContainer
-    :: (forall t . f t -> g t)
-    -> ChildrenContainer f
-    -> ChildrenContainer g
-transChildrenContainer trans = ChildrenContainer . trans . runChildrenContainer
-
--- | Use an accessor to get a particular child.
-getChild
-    :: (forall t . f t -> t)
-    -> ChildrenContainer f
-    -> ElementSchemaChild
-getChild accessor = accessor . runChildrenContainer
-
--- | Use a mutator to set a particular child.
-setChild
-    :: (forall t . t -> f t -> f t)
-    -> ElementSchemaChild
-    -> ChildrenContainer f
-    -> ChildrenContainer f
-setChild mutator x = ChildrenContainer . mutator x . runChildrenContainer
-
-dumpChildren
-    :: ( Foldable f )
-    => ChildrenContainer f
-    -> [ElementSchemaChild]
-dumpChildren = toList . runChildrenContainer
-
-{-
--- An example of an f for ChildrenContainer. Delete later.
--- An ElementSchema Two t is guaranteed to carry precisely 2 children, each
--- with a value of type t.
-newtype Two t = Two { runTwo :: (t, t) }
-instance Functor Two where
-    fmap f (Two (x, y)) = Two (f x, f y)
-instance Foldable Two where
-    foldr f b (Two (x, y)) = f x (f y b)
-get1 :: Two t -> t
-get1 = fst . runTwo
-get2 :: Two t -> t
-get2 = snd . runTwo
-set1 :: t -> Two t -> Two t
-set1 x (Two (_, y)) = Two (x, y)
-set2 :: t -> Two t -> Two t
-set2 y (Two (x, _)) = Two (x, y)
--}
-
 -- | Description of a DOM element.
 data ElementSchema f = ElementSchema {
       elementSchemaTag :: Tag
     , elementSchemaProperties :: Sequence [Properties]
     , elementSchemaAttributes :: Sequence [Attributes]
     , elementSchemaStyle :: Sequence [Style]
-    , elementSchemaChildren :: Sequence (ChildrenContainer f)
+    -- To describe the children we have the initial ones, and then some
+    -- mutations which come in later. Those mutations of course give us enough
+    -- data not only to keep track of the current f ElementSchemaChild, but
+    -- also to quickly produce the required DOM mutations.
+    , elementSchemaChildren
+          :: ( Mutation ElementSchemaChild NoChildren f
+             , Event (Automutation ElementSchemaChild f)
+             )
     -- Sometimes we need to do some effectful work on a proper DOM element in
     -- order to get what we want. For instance, using external libraries like
     -- Leaflet (map visualizations). We throw in the document for good
@@ -183,33 +133,19 @@ data ElementSchema f = ElementSchema {
     , elementSchemaPostprocess :: ElementSchemaPostprocess
     }
 
--- | Uniformly alter the form of the children containers by way of a natural
---   transformation.
-schemaContainerTrans
-    :: forall f g .
-       (forall t . f t -> g t)
-    -> ElementSchema f
-    -> ElementSchema g
-schemaContainerTrans f eschema = eschema {
-      elementSchemaChildren = alteration (elementSchemaChildren eschema)
-    }
-  where
-    alteration :: Sequence (ChildrenContainer f) -> Sequence (ChildrenContainer g)
-    alteration = fmap (transChildrenContainer f)
-
 newtype ElementSchemaPostprocess = ElementSchemaPostprocess {
       runElementSchemaPostprocess :: forall document . IsDocument document => document -> Element -> MomentIO ()
     }
 
 -- | An empty ElementSchema: no attributes, properties, style, children, etc.
 --   "div" is the chosen tag.
---   The choice of Const () guarantees that there are no children.
-elementSchema :: ElementSchema (Const ())
+--   The choice of NoChildren guarantees that there are no children.
+elementSchema :: ElementSchema NoChildren
 elementSchema =
     let props = always []
         attrs = always []
         style = always []
-        children = always (ChildrenContainer (Const ()))
+        children = (id, never)
         postProcess = ElementSchemaPostprocess (\_ _ -> pure ())
     in  ElementSchema "div"
                       props
@@ -263,12 +199,26 @@ schemaProperties actions schema = schema {
     mergeProperties actions seqnc = runAction <$> actions <*> seqnc
 
 schemaChildren
-    :: (Sequence (ChildrenContainer f) -> Sequence (ChildrenContainer g))
+    :: Mutation ElementSchemaChild f g
+    -> (forall t . Automutation t f -> Automutation t g)
     -> ElementSchema f
     -> ElementSchema g
-schemaChildren f schema = schema {
-      elementSchemaChildren = f (elementSchemaChildren schema)
+schemaChildren fToG autoFToG schema = schema {
+      elementSchemaChildren = (fToG . initial, autoFToG <$> ev)
     }
+  where
+    (initial, ev) = elementSchemaChildren schema
+
+schemaChildrenReact
+    :: Event (Automutation ElementSchemaChild f)
+    -> ElementSchema f
+    -> ElementSchema f
+schemaChildrenReact ev schema = schema {
+      elementSchemaChildren = (initial, unionedEv)
+    }
+  where
+    (initial, ev') = elementSchemaChildren schema
+    unionedEv = unionWith (<>) ev' ev
 
 schemaPostprocess
     :: ElementSchemaPostprocess
@@ -343,7 +293,6 @@ renderElementSchemaChild parent =
 
 render
     :: ( IsNode parent
-       , Foldable f
        )
     => Document
     -> parent
@@ -369,7 +318,8 @@ unrender = liftIO . unrenderNode
 --   just tack those events onto the element and then when the element is
 --   unreachable, so too are the events.
 runElementSchema
-    :: ( Foldable f )
+    :: forall f .
+       ( )
     => Document
     -> ElementSchema f
     -> MomentIO Element
@@ -377,35 +327,31 @@ runElementSchema document eschema = mdo
     el <- makeElement document (elementSchemaTag eschema)
 
     -- * Children *
-    -- This sequenceCommute renders the new list of children whenever it
-    -- changes.
-    -- Fires with the old nodes whenever the children event fires.
-    -- Clears all currently rendered nodes and throws in the new ones. So
-    -- if it fires and the list hasne't even changed, we still do DOM
-    -- mutation.
- 
-    {-
-    let clearAndRender :: ([RenderedNode], [ElementSchemaChild]) -> MomentIO [RenderedNode]
-        clearAndRender (old, new) = liftIO $ do
-            mapM_ unrenderNode old
-            mapM (renderElementSchemaChild el) new
-
-    (initialChildren, evChildren) <- runSequence childrenSequence
-    initialRendered <- mapM (renderElementSchemaChild el) initialChildren
-    oldRendered <- stepper initialRendered evRendered
-    evRendered <- execute (curry clearAndRender <$> oldRendered <@> evChildren)
-    -}
-
-    let childrenSequence = dumpChildren <$> elementSchemaChildren eschema
-    (initialChildren, evChildren) <- runSequence childrenSequence
-    initialRendered <- mapM (renderElementSchemaChild el) initialChildren
-    oldRendered <- stepper initialRendered evRendered
-    evRendered <- execute (updateChildren el . reverse . editList <$> childrenEdits)
-    let childrenEdits :: Event (EditList RenderedNode ElementSchemaChild)
-        childrenEdits = edits renderedFrom <$> oldRendered <@> evChildren
-
-    reactimate (Prelude.print . fmap (mapEdit (const ()) (const ())) . editList  <$> childrenEdits)
-    --reactimate ((\x -> Prelude.print (concat ["Update cost: ", show (length (totalCost x))])) <$> evRendered)
+    let initialMutation :: Mutation ElementSchemaChild NoChildren f
+        initialMutation = fst (elementSchemaChildren eschema)
+    let evMutation :: Event (Automutation ElementSchemaChild f)
+        evMutation = snd (elementSchemaChildren eschema)
+    let initial :: (f ElementSchemaChild, [ChildrenMutation ElementSchemaChild])
+        initial = runMutation initialMutation noChildren
+    beF :: Behavior (f ElementSchemaChild)
+        <- stepper (fst initial) (fst <$> evF)
+    let evF :: Event (f ElementSchemaChild, [ChildrenMutation ElementSchemaChild])
+        evF = flip ($) <$> beF <@> (runMutation <$> evMutation)
+    let mutations :: Event (IO ())
+        mutations = sequence_
+                  . fmap (flip runChildrenMutationIO el . fmap (either SomeNode SomeNode))
+                  . snd
+                 <$> evF
+    -- Run the initial mutations.
+    _ <- liftIO $ sequence_ (fmap (flip runChildrenMutationIO el . fmap (either SomeNode SomeNode)) (snd initial))
+    -- And be sure to run the changes.
+    executedMutations :: Event ()
+        <- execute (liftIO <$> mutations)
+    -- Must ensure this is not GC'd while the element is in the DOM, so we
+    -- reactimate. But that's also not so good I think, because now it will
+    -- *never* be GC'd.
+    -- TODO investigate and solve.
+    --reactimate (pure <$> executedMutations)
 
     reactimateProperties el (elementSchemaProperties eschema)
     reactimateAttributes el (elementSchemaAttributes eschema)
@@ -416,57 +362,6 @@ runElementSchema document eschema = mdo
     pure el 
 
   where
-
-    childrenEdit :: Element -> RunEdit MomentIO RenderedNode ElementSchemaChild RenderedNode
-    childrenEdit el = RunEdit dropChild (consChild el) keepChild
-
-    dropChild :: RenderedNode -> MomentIO ()
-    dropChild rendered = do
-       {-
-        liftIO (putStrLn "dropChild")
-        let el = renderedElementSchemaChild rendered
-        case el of
-            Left el -> do
-                Just (vid :: String) <- getAttribute el ("virtual_id" :: String)
-                liftIO (putStrLn vid)
-            _ -> pure ()
-        -}
-        liftIO (unrenderNode rendered)
-
-    consChild :: Element -> ElementSchemaChild -> MomentIO RenderedNode
-    consChild el child = do
-        {-
-        liftIO (putStrLn "consChild")
-        Just (vid :: String) <- getAttribute el ("virtual_id" :: String)
-        liftIO (putStrLn "Parent id:")
-        liftIO (putStrLn vid)
-        case child of
-            Left elem -> do Just (vid' :: String) <- getAttribute elem ("virtual_id" :: String)
-                            liftIO (putStrLn "Child id:")
-                            liftIO (putStrLn vid')
-                            liftIO (Prelude.print (el == elem))
-            Right _ -> liftIO (putStrLn " Got text ")
-        -}
-        renderElementSchemaChild el child
-
-    keepChild :: RenderedNode -> ElementSchemaChild -> MomentIO RenderedNode
-    keepChild rendered _ = do
-        {-
-        liftIO (putStrLn "keepChild")
-        let el = renderedElementSchemaChild rendered
-        case el of
-            Left el -> do
-                Just (vid :: String) <- getAttribute el ("virtual_id" :: String)
-                liftIO (putStrLn vid)
-            _ -> pure ()
-        -}
-        pure rendered
-
-    updateChildren
-        :: Element
-        -> [Edit RenderedNode ElementSchemaChild]
-        -> MomentIO [RenderedNode]
-    updateChildren = runEdits . childrenEdit
 
     reactimateProperties :: Element -> Sequence [Properties] -> MomentIO ()
     reactimateProperties element sequence = do
@@ -612,11 +507,11 @@ getElement = ElementBuilder $ \rd -> pure (snd rd, id)
 
 -- TBD can we drop the t parameter? From ElementSchema too? If the children
 -- need to carry data, that can go into the functor, no?
-type Widget f t = ElementBuilder (Const ()) f t
+type Widget f t = ElementBuilder NoChildren f t
 
 buildElement
     :: forall f t .
-       ( Foldable f )
+       ( )
     => Widget f t
     -> Document
     -> MomentIO (Element, t)
@@ -689,24 +584,6 @@ knot :: (r -> ElementBuilder a b (t, r)) -> ElementBuilder a b t
 knot mk = ElementBuilder $ \rd -> mdo
     ((t, r), mkf) <- runElementBuilder (mk r) rd
     pure (t, mkf)
-
-{-
-elementBuilderLmap
-    :: (h -> g)
-    -> ElementBuilder g f t
-    -> ElementBuilder h f t
-elementBuilderLmap l builder = ElementBuilder $ \rd -> do
-    (t, mk) <- runElementBuilder builder rd
-    pure (t, lmap l mk)
-
-elementBuilderRmap
-    :: (f -> h)
-    -> ElementBuilder g f t
-    -> ElementBuilder g h t
-elementBuilderRmap r builder = ElementBuilder $ \rd -> do
-    (t, mk) <- runElementBuilder builder rd
-    pure (t, rmap r mk)
--}
 
 momentIO :: MomentIO t -> ElementBuilder a a t
 momentIO mio = ElementBuilder $ \_ -> do
@@ -814,7 +691,7 @@ instance ElementEvent Scroll where
             liftIO (fire d)
 
 widget
-    :: ( Foldable g )
+    :: ( )
     => Widget g t
     -> ElementBuilder f f (ElementSchemaChild, t)
 widget wid = ElementBuilder $ \(doc, _) -> do
@@ -828,13 +705,49 @@ text txt = ElementBuilder $ \(doc, _) -> do
     txt' <- makeText doc txt
     pure (Right txt', id)
 
+newtype ChildBuilder = ChildBuilder {
+      runChildBuilder :: forall g t . Widget g t -> MomentIO (ElementSchemaChild, t)
+    }
+
+buildChild
+    :: ( )
+    => ChildBuilder
+    -> Widget g t
+    -> MomentIO (ElementSchemaChild, t)
+buildChild = runChildBuilder
+
+childBuilder :: ElementBuilder f f ChildBuilder
+childBuilder = ElementBuilder $ \(doc, _) ->
+    let buildElement' :: forall g t . Widget g t -> MomentIO (ElementSchemaChild, t)
+        buildElement' w = do (e, t) <- buildElement w doc
+                             pure (Left e, t)
+    in  pure (ChildBuilder buildElement', id)
+
+-- This one is actually not very useful, no?
+-- We want something more general, like builderCommute above.
+widgetCommute
+    :: forall f g t .
+       ( )
+    => Event (Widget g t)
+    -> ElementBuilder f f (Event (ElementSchemaChild, t))
+widgetCommute ev = ElementBuilder $ \(doc, _) -> do
+    let built :: Event (MomentIO (Element, t))
+        built = flip buildElement doc <$> ev
+    ev :: Event (Element, t) <- execute built
+    pure ((\(el, t) -> (Left el, t)) <$> ev, id)
+
 -- | Alter the children of the ElementSchema.
-children
+childrenSet
     :: forall g f .
-       (Sequence (g ElementSchemaChild) -> Sequence (f ElementSchemaChild))
+       Mutation ElementSchemaChild g f
+    -> (forall t . Automutation t g -> Automutation t f)
     -> ElementBuilder g f ()
-children f = ElementBuilder $ \rd -> do
-    pure ((), schemaChildren f')
-  where
-    f' :: Sequence (ChildrenContainer g) -> Sequence (ChildrenContainer f)
-    f' = fmap ChildrenContainer . f . fmap runChildrenContainer
+childrenSet fToG autoFToG = ElementBuilder $ \rd -> do
+    pure ((), schemaChildren fToG autoFToG)
+
+childrenReact
+    :: forall f .
+       Event (Automutation ElementSchemaChild f)
+    -> ElementBuilder f f ()
+childrenReact autoF = ElementBuilder $ \rd -> do
+    pure ((), schemaChildrenReact autoF)
