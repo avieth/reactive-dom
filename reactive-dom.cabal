@@ -17,15 +17,19 @@ cabal-version:       >=1.10
 
 library
   exposed-modules:     Reactive.DOM.Node
+                     , Reactive.DOM.Children.Cardinality
+                     , Reactive.DOM.Children.NodeList
+                     , Reactive.DOM.Children.MonotoneList
                      , Reactive.DOM.Flow
                      , Reactive.DOM.Window
                      , Reactive.DOM.XHR
                      , Reactive.DOM.Geolocation
                      , Reactive.DOM.WebApp
 
-  other-modules        Reactive.DOM.Edit
+  other-modules:       Reactive.DOM.Edit
                      , Reactive.DOM.Internal.Node
                      , Reactive.DOM.Internal.Flow
+                     , Reactive.DOM.Internal.Mutation
 
   -- other-modules:       
   other-extensions:    AutoDeriveTypeable
@@ -41,6 +45,7 @@ library
                      , containers >=0.5 && <0.6
                      , reactive-banana >=1.0 && <1.1
                      , semigroups >= 0.18 && < 0.19
+                     , array <= 0.6
                      , ghcjs-base
                      , ghcjs-dom
                      , profunctors
