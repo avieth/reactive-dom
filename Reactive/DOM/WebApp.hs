@@ -45,7 +45,7 @@ module Reactive.DOM.WebApp (
 
     ) where
 
-import Prelude hiding ((.), id)
+import Prelude hiding ((.), id, div)
 import GHC.TypeLits (Symbol, KnownSymbol, symbolVal)
 import Control.Category
 import Control.Arrow
@@ -58,7 +58,10 @@ import Data.List (intersperse)
 import qualified Data.Text as T
 import Reactive.Banana.Frameworks
 import Reactive.Sequence
+import Reactive.DOM.Node
 import Reactive.DOM.Flow
+import Reactive.DOM.Children.NodeList
+import Reactive.DOM.Widget.Primitive
 import GHCJS.Types
 import GHCJS.DOM.Window hiding (error, print, getWindow)
 import GHCJS.DOM.Location (getPathname)
@@ -256,8 +259,8 @@ instance {-# OVERLAPS #-}
 -- Kick off a flow using a Window object, from which the browser's navigation
 -- bar's path name is retrieved.
 -- It's intended that this be used on page load, and on history pop/push events.
--- From these ingredients a Sequence (Flow o () Void) may be derived, suitable
--- for use by varyingFlow.
+-- From these ingredients a Sequence (Flow o () Void) may be derived, and
+-- from that we can derive children of a widget.
 start
     :: ( MatchRoute router router )
     => Proxy router
@@ -320,15 +323,16 @@ routePath
     -> T.Text
 routePath route = T.cons '/' . mconcat . intersperse (T.pack "/") . routePathParts route
 
+
 webApp
     :: ( MatchRoute router router )
     => Window
     -> Router router
     -> WebAppFlow router () Void -- route doesn't match, use this.
-    -> MomentIO (Flow () () Void)
-webApp window router notFound = do
-    liftIO (putStrLn "webApp : setting up")
-    (rest, fire) <- newEvent
+    -> Widget () ()
+webApp window router notFound = widget $ \_ -> do
+    liftMomentIO (liftIO (putStrLn "webApp : setting up"))
+    (rest, fire) <- liftMomentIO newEvent
     let state = (window, router)
     let onPopState :: IO ()
         onPopState = do
@@ -339,11 +343,15 @@ webApp window router notFound = do
             fire flow
     -- Oddly enough, popstate is also fired when history is pushed.
     -- The web is weird.
-    unbind <- liftIO $ on window popState (liftIO onPopState)
+    unbind <- liftMomentIO . liftIO $ on window popState (liftIO onPopState)
     let first = arr (\i -> (i, state)) >>> runReader (runWebAppFlow (start Proxy notFound))
-    let seqnc = first |> rest
-    sequenceReactimate (const (putStrLn "webApp : flow changing") <$> seqnc)
-    varyingFlow seqnc
+    let seqnc :: Sequence MomentIO (Flow () () Void)
+        seqnc = first |> rest
+    liftMomentIO (sequenceReactimate (const (putStrLn "webApp : flow changing") <$> seqnc))
+    let childrenSequence :: Sequence MomentIO (NodeList (Sequence MomentIO ()) SetChild)
+        childrenSequence = nodeList . pure . newChild . div . flip runFlow () <$> seqnc
+    (firstChild, restChild) <- liftMomentIO (runSequence childrenSequence)
+    pure ((), children firstChild (pure <$> restChild))
 
 
 {-

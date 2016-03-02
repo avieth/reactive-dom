@@ -25,7 +25,9 @@ import Prelude hiding ((.), id)
 import Control.Applicative
 import Control.Category
 import Control.Arrow
+import Control.Monad.Trans.Class (lift)
 import Data.Void
+import Data.Bifunctor (bimap)
 import Data.Functor.Compose
 import Data.Monoid (mempty)
 import Data.Algebraic.Index
@@ -35,16 +37,21 @@ import Reactive.Banana.Combinators
 import Reactive.Banana.Frameworks
 import Reactive.Sequence
 import Reactive.DOM.Internal.Node
-import Reactive.DOM.Children.Cardinality
+import Reactive.DOM.Children.Single
 
 -- | Description of a user interface flow: taking an s, producing a t, with
 --   a side-channel producing an o.
 data Flow o s t where
     FlowMoment :: (s -> MomentIO t) -> Flow o s t
-    FlowWidget :: (s -> Widget f (o, Event t)) -> Flow o s t
+    FlowUI :: (s -> UI (o, Event t)) -> Flow o s t
     -- | A time-varying Flow. The Behavior must be derived from the Event
     --   via stepper.
-    FlowVarying :: (Behavior (Flow o s t), Event (Flow o s t)) -> Flow o s t
+    --   Removed. TBD is it worth having? We have impure flows, so we can
+    --   simulate the idea of taking the some current value and using it to
+    --   give a flow. And the other aspect of varying flows is that they give
+    --   a second way of inducing a flow change (the other way is from
+    --   FlowUI's event). Maybe having 2 ways is not such a good idea.
+    --FlowVarying :: (Behavior (Flow o s t), Event (Flow o s t)) -> Flow o s t
     -- | Symbolic composition.
     FlowCompose :: Flow o u t -> Flow o s u -> Flow o s t
     -- | Symbol first, for Arrow.
@@ -83,26 +90,28 @@ pureFlow f = FlowMoment $ pure . f
 impureFlow :: (s -> MomentIO t) -> Flow o s t
 impureFlow = FlowMoment
 
-varyingFlow :: Sequence (Flow o s t) -> MomentIO (Flow o s t)
+{-
+varyingFlow :: MonadMoment m => Sequence m (Flow o s t) -> m (Flow o s t)
 varyingFlow seqnc = do
     (first, rest) <- runSequence seqnc
     b <- stepper first rest
     pure $ FlowVarying (b, rest)
+-}
 
-widgetFlow :: (s -> Widget f (o, Event t)) -> Flow o s t
-widgetFlow = FlowWidget
+uiFlow :: (s -> UI (o, Event t)) -> Flow o s t
+uiFlow = FlowUI
 
-widgetFlow' :: Widget f (Event t) -> Flow o o t
-widgetFlow' mk = FlowWidget $ \o -> mk >>>= \ev -> ixpure (o, ev)
+uiFlow' :: UI (Event t) -> Flow o o t
+uiFlow' mk = FlowUI $ \o -> mk `modify` modifier (\ev -> pure (o, ev))
 
 flowMap :: (o -> o') -> Flow o s t -> Flow o' s t
 flowMap f flow = case flow of
     FlowCompose l r -> FlowCompose (flowMap f l) (flowMap f r)
     FlowFirst fst -> FlowFirst (flowMap f fst)
     FlowLeft left -> FlowLeft (flowMap f left)
-    FlowVarying (be, ev) -> FlowVarying (flowMap f <$> be, flowMap f <$> ev)
+    --FlowVarying (be, ev) -> FlowVarying (flowMap f <$> be, flowMap f <$> ev)
     FlowMoment m -> FlowMoment m
-    FlowWidget mk -> FlowWidget ((fmap . fmap) (\(o, ev) -> (f o, ev)) mk)
+    FlowUI mk -> FlowUI ((fmap . fmap) (\(o, ev) -> (f o, ev)) mk)
     FlowApp -> proc (flow, s) -> do
         FlowApp -< (flowMap f flow, s)
 
@@ -168,10 +177,12 @@ alterFlow fwidget fflow flow = case flow of
                         Right c -> do
                             returnA -< Right (Right c)
 
+    {-
     FlowVarying (be, ev) ->
         let be' = alterFlow fwidget fflow <$> be
             ev' = alterFlow fwidget fflow <$> ev
         in  FlowVarying (be', ev')
+    -}
 
     Flow mk ->
         let altered = Flow $ \s -> case mk s of
@@ -223,101 +234,84 @@ alterFlowUniform fwidget fflow flow =
     fflow' _ = arr fst >>> fflow >>> arr Left
 -}
 
-splitEvent :: forall t r . Event (Either t (r, Event t)) -> (Event r, Event t)
-splitEvent ev =
-    let lefts :: Event t
-        lefts = filterJust (either Just (const Nothing) <$> ev)
-        rights :: Event t
-        rights = switchE (filterJust (either (const Nothing) (Just . snd) <$> ev))
-        rs :: Event r
-        rs = filterJust (either (const Nothing) (Just . fst) <$> ev)
-    in  (rs, unionWith const lefts rights)
+newtype FlowContinuation o r = FlowContinuation {
+      runFlowContinuation :: UI (o, Event (MomentIO (Either r (FlowContinuation o r))))
+    }
 
--- | Since a Flow does not necessarily contain any Widgets, the general
---   run flow may give back a value (Left). Otherwise (Right), you get a
---   sequence of Widgets, and an Event which fires when the Flow is complete.
 runFlowGeneral
-    :: forall o s t .
-       Document
-    -> Flow o s t
+    :: forall o s t r .
+       Flow o s t
+    -> (t -> MomentIO (Either r (FlowContinuation o r)))
     -> s
-    -> MomentIO (Either t (Sequence (Element, o), Event t))
-runFlowGeneral document flow = case flow of
-    FlowApp -> \(flow', s) -> runFlowGeneral document flow' s
-    FlowCompose (left :: Flow o u t) (right :: Flow o s u) -> \s -> do
-        right' <- runFlowGeneral document right s
-        case right' of
-            Left t -> runFlowGeneral document left t
-            Right (seqnc, ev) -> do
-                let next :: Event (MomentIO (Either t (Sequence (Element, o), Event t)))
-                    next = runFlowGeneral document left <$> ev
-                executed :: Event (Either t (Sequence (Element, o), Event t))
-                    <- execute next
-                let split :: (Event (Sequence (Element, o)), Event t)
-                    split = splitEvent executed
-                let otherSeqncs = fst split
-                let finalSeqnc = sequenceSwitch (seqnc |> otherSeqncs)
-                pure $ Right (finalSeqnc, snd split)
-    FlowFirst subFlow -> \(s, c) -> do
-        out <- runFlowGeneral document subFlow s
-        pure $ case out of
-            Left t -> Left (t, c)
-            Right (seqnc, ev) -> Right (seqnc, (\t -> (t, c)) <$> ev)
-    FlowLeft subFlow -> \choice -> case choice of
-        Right c -> pure $ Left (Right c)
-        Left s -> do
-            out <- runFlowGeneral document subFlow s
-            pure $ case out of
-                Left t -> Left (Left t)
-                Right (seqnc, ev) -> Right (seqnc, (\t -> Left t) <$> ev)
-    FlowVarying (be, ev) -> \s -> do
-        current :: Flow o s t <- valueB be
-        let seqnc :: Sequence (Flow o s t)
-            seqnc = rstepper current ev
-        let nexts :: Sequence (MomentIO (Either t (Sequence (Element, o), Event t)))
-            nexts = (\flow -> runFlowGeneral document flow s) <$> seqnc
-        commuted :: Sequence (Either t (Sequence (Element, o), Event t))
-            <- sequenceCommute nexts
-        (first, rest) <- runSequence commuted
-        case first of
-            -- First element has a value for us; use it and we're off.
-            Left t -> pure $ Left t
-            Right (seqnc, evNext) -> do
-                -- The event to give, in case it's even necessary, shall be the event
-                -- of whichever sequence of widgets is currently shown, unioned with
-                -- an event which fires whenever a non-widget flow comes up.
-                let nextEventRight :: Event t
-                    nextEventRight = switchE (snd <$> filterJust (either (const Nothing) Just <$> rest))
-                let nextEventLeft :: Event t
-                    nextEventLeft = (filterJust (either Just (const Nothing) <$> rest))
-                let nextEvent :: Event t
-                    nextEvent = unionWith const nextEventRight nextEventLeft
-                let widgetSequence :: Sequence (Sequence (Element, o))
-                    widgetSequence = seqnc |> (fst <$> filterJust (either (const Nothing) Just <$> rest))
-                pure $ Right (sequenceSwitch widgetSequence, nextEvent)
-    FlowMoment f -> \s -> Left <$> f s
-    FlowWidget mk -> \s -> do
-        (el, (o, ev)) <- buildElement (mk s) document
-        pure $ Right (always (el, o), ev)
+    -> MomentIO (Either r (FlowContinuation o r))
+runFlowGeneral flow k = case flow of
 
--- | Produce a virtual element which shows a complete flow, along with the
---   switched output.
---   Notice the Identity parameter, indicating the Widget generated from
---   the flow will always have precisely one child.
+    FlowMoment f -> \s -> do
+        t <- f s
+        k t
+
+    FlowUI mk -> \s -> pure (Right (FlowContinuation ((fmap . fmap . fmap) k (mk s))))
+
+    FlowApp -> \(flow', s) -> runFlowGeneral flow' k s
+
+    FlowFirst subFlow -> \(s, c) -> do
+        runFlowGeneral subFlow (\t -> k (t, c)) s
+
+    FlowLeft subFlow -> \choice -> case choice of
+        Right c -> k (Right c)
+        Left s -> runFlowGeneral subFlow (k . Left) s
+
+    FlowCompose (left :: Flow o u t) (right :: Flow o s u) -> \s -> do
+        let k' = runFlowGeneral left k
+        runFlowGeneral right k' s
+
+-- TBD Maybe runFlow should just give an Intrinsic part, rather than choosing
+-- the "div" tag.
+--
+-- If we give a Sequence Extrinsic o then it's useless. Must transform it to
+-- MomentIO.
+-- Perhaps put an m parameter on the Widget and use this to fix the Sequence's
+-- m parameter?
 runFlow
     :: forall o s .
        Flow o s Void
-    -> s 
-    -> Widget (Cardinality One) (Sequence o)
-runFlow flow s =
-    getDocument >>>= \document ->
-    momentIO (runFlowGeneral document flow s) >>>= \x ->
-    let (seqnc, mustBeNever) = either absurd id x
-        elems :: Sequence ElementSchemaChild
-        elems = Left . fst <$> seqnc
-        outs :: Sequence o
-        outs = snd <$> seqnc
-    in  momentIO (runSequence elems) >>>= \(firstChild, evChild) ->
-        childrenSet (cardinality (VCons firstChild VNil)) (const id) >>>= \_ ->
-        childrenReact ((\c -> cardinalitySet ix1 (const c)) <$> evChild) >>>= \_ ->
-        ixpure outs
+    -> s
+    -> Widget () (Sequence MomentIO o)
+runFlow flow s = widget $ \(_, viewChildren) -> do
+
+    let first :: (o, Event (MomentIO (Either Void (FlowContinuation o Void))))
+        rest :: Event (o, Event (MomentIO (Either Void (FlowContinuation o Void))))
+        first = childData . runSingle $ viewChildrenInitial viewChildren
+        rest = childData . runSingle <$> (viewChildrenEvent viewChildren)
+
+    -- A sequence of events, each of which gives a MomentIO producing
+    -- the next Widget to show and the next continuation.
+    let conts :: Sequence MomentIO (Event (MomentIO (FlowContinuation o Void)))
+        conts =  ((fmap . fmap) (either absurd id) . snd  $ first)
+              |> ((fmap . fmap) (either absurd id) . snd <$> rest)
+    changeEvents :: Event (FlowContinuation o Void)
+        <- liftMomentIO (sequenceSwitchE conts >>= execute)
+
+    -- We can take the first FlowContinuation. We know it's there because
+    -- the Left variant from runFlowGeneral is Void.
+    x <- liftMomentIO (runFlowGeneral flow absurd s)
+    let fk :: FlowContinuation o Void
+        fk = either absurd id x
+
+    -- The first child.
+    let uiFirst :: UI (o, Event (MomentIO (Either Void (FlowContinuation o Void))))
+        uiFirst = runFlowContinuation fk
+    -- The remaining children, defined via changeEvents and ultimately
+    -- derived from the input (first, rest).
+    let uiRest :: Event (UI (o, Event (MomentIO (Either Void (FlowContinuation o Void)))))
+        uiRest = runFlowContinuation <$> changeEvents
+
+    -- Using the data from the rendered children, we have the output data
+    -- readily available: just strip off theFlowContinuation parts.
+    let values = (fst first) |> (fst <$> rest)
+
+    let kids = children (Single (newChild uiFirst))
+                        (pure . Single . newChild <$> uiRest)
+
+    -- State the output values and children.
+    pure $ (values, kids)

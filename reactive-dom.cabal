@@ -25,6 +25,8 @@ library
                      , Reactive.DOM.XHR
                      , Reactive.DOM.Geolocation
                      , Reactive.DOM.WebApp
+                     , Reactive.DOM.Widget.Picture
+                     , Reactive.DOM.Widget.Paginator
 
   other-modules:       Reactive.DOM.Edit
                      , Reactive.DOM.Internal.Node

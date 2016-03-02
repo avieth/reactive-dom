@@ -13,23 +13,37 @@ module Reactive.DOM.Node (
       render
     , unrender
     , ElementBuilder
+    , liftMomentIO
     , Widget
-    , buildElement
-    , ixmap
-    , ixpure
-    , ixap
-    , ixbind
-    , ixmfix
-    , (>>>=)
-    , (>>>>)
-    , (<*>>)
-    , (<$>>)
+    , widget
     , knot
-    , momentIO
-    , tag
+    , tie
+    , dimap'
+    , lmap'
+    , rmap'
+    , UI
+    , ui
+    , Children
+    , constantChildren
+    , children
+    , ViewChildren
+    , viewChildrenBehavior
+    , viewChildrenInitial
+    , viewChildrenChanges
+    , viewChildrenEvent
+    , viewChildrenTrans
+    , Child
+    , childData
+    , SetChild
+    , newChild
+    , existingChild
+    , textChild
     , style
+    , styleHover
     , attributes
     , properties
+    , IOEvent
+    , ioEvent
     , clientHeight
     , clientWidth
     , scrollHeight
@@ -38,16 +52,13 @@ module Reactive.DOM.Node (
     , Click(..)
     , Submit(..)
     , Input(..)
+    , Mouseenter(..)
+    , Mouseleave(..)
     , Scroll(..)
     , ScrollData(..)
-    , widget
-    , text
-    , widgetCommute
-    , childrenSet
-    , childrenReact
-    , ChildBuilder
-    , childBuilder
-    , buildChild
+    , Modifier
+    , modifier
+    , modify
 
     , Element
     , Document
@@ -61,14 +72,14 @@ module Reactive.DOM.Node (
     , Attributes
     , Tag
 
-    , Mutation
-    , Automutation
     , ChildrenMutation
 
-    , module Reactive.DOM.Children.Cardinality
+    , module Reactive.DOM.Internal.ChildrenContainer
+    -- , module Reactive.DOM.Children.Cardinality
 
     ) where
 
 import Reactive.DOM.Internal.Node
 import Reactive.DOM.Internal.Mutation
-import Reactive.DOM.Children.Cardinality
+import Reactive.DOM.Internal.ChildrenContainer
+--import Reactive.DOM.Children.Cardinality

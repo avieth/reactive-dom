@@ -8,17 +8,34 @@ Stability   : experimental
 Portability : non-portable (GHC only)
 -}
 
+{-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE DeriveFunctor #-}
+{-# LANGUAGE DeriveTraversable #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE TypeFamilies #-}
+
 module Reactive.DOM.Children.MonotoneList where
 
+import Data.Semigroup
+import Data.Functor.Compose
+import Reactive.DOM.Internal.ChildrenContainer
 import Reactive.DOM.Internal.Mutation
-import Reactive.DOM.Children.Cardinality
 
-data MonotoneList t = MonotoneListNil | MonotoneListAppend (MonotoneList t) [t]
+newtype MonotoneList t f = MonotoneList {
+      runMonotoneList :: [f t]
+    }
 
-monotoneList :: [t] -> Mutation t (Cardinality Zero) MonotoneList
-monotoneList ts = Mutation $ \_ ->
-    (MonotoneListAppend MonotoneListNil ts, AppendChild <$> ts)
+deriving instance Semigroup (MonotoneList t f)
+deriving instance Monoid (MonotoneList t f)
 
-monotoneListAppend :: [t] -> Automutation t MonotoneList
-monotoneListAppend ts = Mutation $ \mlist ->
-    (MonotoneListAppend mlist ts, AppendChild <$> ts)
+instance FunctorTransformer (MonotoneList t) where
+    functorTrans trans (MonotoneList fts) = MonotoneList (trans <$> fts)
+    functorCommute (MonotoneList fts) = MonotoneList <$> sequenceA (getCompose <$> fts)
+
+instance ChildrenContainer (MonotoneList t) where
+    type Change (MonotoneList t) = MonotoneList t
+    getChange get (MonotoneList news) (MonotoneList olds) =
+        let nextList = MonotoneList (olds <> news)
+            mutations = AppendChild . get <$> news
+        in  (nextList, mutations)
+    childrenContainerList get (MonotoneList ts) = get <$> ts
