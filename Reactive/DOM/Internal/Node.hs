@@ -188,6 +188,13 @@ instance Profunctor (Widget tag) where
         (t, c') <- mk (l s, c)
         pure (r t, c')
 
+-- | Like first for arrows, but since Widget is not an arrow (can't give arr)
+--   we make our own.
+passthrough :: Widget tag s t -> Widget tag (s, c) (t, c)
+passthrough (Widget mk) = Widget $ \(~((s, c), viewChildren)) -> do
+    (t, setChildren) <- mk (s, viewChildren)
+    pure ((t, c), setChildren)
+
 -- | Like dimap, but we allow you to MomentIO.
 dimap'
     :: (q -> ElementBuilder tag s)

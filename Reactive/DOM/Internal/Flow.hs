@@ -27,7 +27,7 @@ import Control.Category
 import Control.Arrow
 import Control.Monad.Trans.Class (lift)
 import Data.Void
-import Data.Bifunctor (bimap)
+import Data.Profunctor
 import Data.Functor.Compose
 import Data.Monoid (mempty)
 import Data.Algebraic.Index
@@ -44,7 +44,7 @@ import Reactive.DOM.Children.Single
 --   a side-channel producing an o.
 data Flow o s t where
     FlowMoment :: (s -> MomentIO t) -> Flow o s t
-    FlowUI :: (s -> UI (o, Event t)) -> Flow o s t
+    FlowWidget :: W3CTag tag => Widget tag s (o, Event t) -> Flow o s t
     -- | Symbolic composition.
     FlowCompose :: Flow o u t -> Flow o s u -> Flow o s t
     -- | Symbol first, for Arrow.
@@ -83,20 +83,19 @@ pureFlow f = FlowMoment $ pure . f
 impureFlow :: (s -> MomentIO t) -> Flow o s t
 impureFlow = FlowMoment
 
-uiFlow :: (s -> UI (o, Event t)) -> Flow o s t
-uiFlow = FlowUI
+widgetFlow :: W3CTag tag => (Widget tag s (o, Event t)) -> Flow o s t
+widgetFlow = FlowWidget
 
-uiFlow' :: W3CTag tag => Widget tag () (Event t) -> Flow o o t
-uiFlow' mk = FlowUI $ \o -> ui (mk `modify` modifier (\ev -> pure (o, ev)))
+widgetFlow' :: W3CTag tag => Widget tag s (Event t) -> Flow o (s, o) t
+widgetFlow' w = FlowWidget $ rmap (\(ev, o) -> (o, ev)) (passthrough w)
 
 flowMap :: (o -> o') -> Flow o s t -> Flow o' s t
 flowMap f flow = case flow of
     FlowCompose l r -> FlowCompose (flowMap f l) (flowMap f r)
     FlowFirst fst -> FlowFirst (flowMap f fst)
     FlowLeft left -> FlowLeft (flowMap f left)
-    --FlowVarying (be, ev) -> FlowVarying (flowMap f <$> be, flowMap f <$> ev)
     FlowMoment m -> FlowMoment m
-    FlowUI mk -> FlowUI ((fmap . fmap) (\(o, ev) -> (f o, ev)) mk)
+    FlowWidget mk -> FlowWidget (fmap (\(o, ev) -> (f o, ev)) mk)
     FlowApp -> proc (flow, s) -> do
         FlowApp -< (flowMap f flow, s)
 
@@ -235,7 +234,9 @@ runFlowGeneral flow k = case flow of
         t <- f s
         k t
 
-    FlowUI mk -> \s -> pure (Right (FlowContinuation ((fmap . fmap . fmap) k (mk s))))
+    FlowWidget mk -> \s ->
+        let theUI = ui (lmap (const s) mk)
+        in  pure (Right (FlowContinuation ((fmap . fmap . fmap) k theUI)))
 
     FlowApp -> \(flow', s) -> runFlowGeneral flow' k s
 

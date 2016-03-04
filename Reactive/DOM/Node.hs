@@ -23,6 +23,7 @@ module Reactive.DOM.Node (
     , widget
     , openWidget
     , closeWidget
+    , passthrough
     , knot
     , tie
     , dimap'
@@ -51,6 +52,7 @@ module Reactive.DOM.Node (
     , clientWidth
     , scrollHeight
     , scrollWidth
+    , ElementEvent
     , event
     , Click(..)
     , Submit(..)
