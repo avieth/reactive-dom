@@ -670,6 +670,13 @@ schemaProperties actions schema = schema {
 
 runElementSchema :: ElementSchema -> Element -> MomentIO ()
 runElementSchema eschema el = do
+    -- Reactimating these sequences probably causes a space leak. As far as I
+    -- know, reactimating an event keeps that event alive... seems that's how
+    -- it has to be.
+    -- In typical use, these events will often be never (in case of constant
+    -- style, attributes, properties). But every non-never event which is
+    -- used to define these sequences will never be collected! We need some way
+    -- to "unreactimate" when the element is collected.
     reactimateProperties el (elementSchemaProperties eschema)
     reactimateAttributes el (elementSchemaAttributes eschema)
     reactimateStyle el (elementSchemaStyle eschema)
