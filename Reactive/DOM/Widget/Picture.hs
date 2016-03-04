@@ -46,9 +46,8 @@ dataUri duri = T.concat [
     ]
 
 -- | A static picture.
-picture :: PictureSource -> Widget ()
-picture sdatauri = widget $ \_ -> do
-    tag "img"
+picture :: PictureSource -> UI ()
+picture sdatauri = ui "img" $ widget $ \_ -> do
     attributes attrs
     pure ((), constantChildren (Static (nodeList [])))
   where

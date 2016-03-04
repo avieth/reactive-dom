@@ -17,7 +17,9 @@ cabal-version:       >=1.10
 
 library
   exposed-modules:     Reactive.DOM.Node
-                     , Reactive.DOM.Children.Cardinality
+                     , Reactive.DOM.Children.Single
+                     , Reactive.DOM.Children.Algebraic
+                     , Reactive.DOM.Children.Static
                      , Reactive.DOM.Children.NodeList
                      , Reactive.DOM.Children.MonotoneList
                      , Reactive.DOM.Flow
@@ -25,12 +27,13 @@ library
                      , Reactive.DOM.XHR
                      , Reactive.DOM.Geolocation
                      , Reactive.DOM.WebApp
+                     , Reactive.DOM.Widget.Primitive
                      , Reactive.DOM.Widget.Picture
                      , Reactive.DOM.Widget.Paginator
 
-  other-modules:       Reactive.DOM.Edit
-                     , Reactive.DOM.Internal.Node
+  other-modules:       Reactive.DOM.Internal.Node
                      , Reactive.DOM.Internal.Flow
+                     , Reactive.DOM.Internal.ChildrenContainer
                      , Reactive.DOM.Internal.Mutation
 
   -- other-modules:       

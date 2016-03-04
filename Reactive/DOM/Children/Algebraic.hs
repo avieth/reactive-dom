@@ -109,17 +109,6 @@ instance
 -- | Combine two widgets in such a way that their children share the same
 --   DOM element. The elements of the left one come before the elements of the
 --   right one in the DOM node ordering. You get both of their outputs.
---
---   Is this enough??
---   Maybe Widget *should* have an input type? Then it can be a profunctor.
---     Widget s1 t1 -> Widget s2 t2 -> Widget (s1, t1) (t1, t2)
---   Yeah, that's good. Then we can lmap that one so that it's
---     Widget (t1, t2) (t1, t2)
---   and use
---     knot :: Widget a b -> UI b
---   where
---     UI b = Widget () b
---   Ok that could be *very* cool.
 widgetProduct :: Widget s1 t1 -> Widget s2 t2 -> Widget (s1, s2) (t1, t2)
 widgetProduct (Widget mk1) (Widget mk2) = widget $ \(~((s1, s2), viewChildren)) -> do
     let transLeft :: forall f left right . Product left right f -> left f
