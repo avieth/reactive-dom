@@ -32,6 +32,7 @@ library
                      , Reactive.DOM.Widget.Paginator
 
   other-modules:       Reactive.DOM.Internal.Node
+                     , Reactive.DOM.Internal.Tag
                      , Reactive.DOM.Internal.Flow
                      , Reactive.DOM.Internal.ChildrenContainer
                      , Reactive.DOM.Internal.Mutation

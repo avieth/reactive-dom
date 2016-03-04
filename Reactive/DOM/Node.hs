@@ -45,10 +45,6 @@ module Reactive.DOM.Node (
     , newChild
     , existingChild
     , textChild
-    , style
-    , styleHover
-    , attributes
-    , properties
     , IOEvent
     , ioEvent
     , clientHeight
@@ -75,8 +71,14 @@ module Reactive.DOM.Node (
     , makeAttributes
     , Action(..)
     , Style
+    , style
+    , styleHover
     , Properties
+    , properties
     , Attributes
+    , attributes
+    , Postprocess(..)
+    , postprocess
 
     , ChildrenMutation
 
@@ -95,7 +97,7 @@ import Data.Profunctor
 
 -- | Make any Widget into an OpenWidget. The OpenWidget has that Widget as its
 --   only child, always.
-openWidget :: forall tag s t . W3CTagName tag => Widget tag s t -> OpenWidget s t
+openWidget :: forall tag s t . W3CTag tag => Widget tag s t -> OpenWidget s t
 openWidget w = widget $ \(~(s, viewChildren)) -> do
     let child :: UI t
         child = ui (lmap (const s) w)

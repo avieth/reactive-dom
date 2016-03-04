@@ -36,7 +36,7 @@ import Data.Algebraic.Product hiding (Component)
 import Reactive.Banana.Combinators
 import Reactive.Banana.Frameworks
 import Reactive.Sequence
-import Reactive.DOM.Internal.Tag (W3CTagName)
+import Reactive.DOM.Internal.Tag (W3CTag)
 import Reactive.DOM.Internal.Node
 import Reactive.DOM.Children.Single
 
@@ -86,7 +86,7 @@ impureFlow = FlowMoment
 uiFlow :: (s -> UI (o, Event t)) -> Flow o s t
 uiFlow = FlowUI
 
-uiFlow' :: W3CTagName tag => Widget tag () (Event t) -> Flow o o t
+uiFlow' :: W3CTag tag => Widget tag () (Event t) -> Flow o o t
 uiFlow' mk = FlowUI $ \o -> ui (mk `modify` modifier (\ev -> pure (o, ev)))
 
 flowMap :: (o -> o') -> Flow o s t -> Flow o' s t

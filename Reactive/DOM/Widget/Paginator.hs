@@ -128,7 +128,11 @@ paginator = lmap makeInput (rmap' makeOutput product)
         pure ((initialT, evT), output)
 
     button :: UI (Event ())
-    button = ui (span (lmap (const "Get more") (rmap' (const (event Click)) constantText)))
+    button = let open = lmap (const "Get more") (span constantText)
+                 closed = rmap' (const (event Click)) open
+             in  ui closed
 
     loading :: UI (Event ())
-    loading = ui (span (lmap (const "Loading...") (rmap' (const (pure never)) constantText)))
+    loading = let open = lmap (const "Loading...") (span constantText)
+                  closed = rmap (const never) open
+              in  ui closed

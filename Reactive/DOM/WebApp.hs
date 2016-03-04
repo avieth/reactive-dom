@@ -354,7 +354,7 @@ webApp window router notFound = widget $ \_ -> do
         -- Why?
         --   runFlow :: Flow o s Void -> (forall tag . Widget tag s (Sequence MomentIO o))
         --   div :: (forall tag . Widget tag s t) -> Widget "div" s t
-        --   ui :: forall tag t . W3CTagName tag => Widget tag () t -> UI t
+        --   ui :: forall tag t . W3CTag  tag => Widget tag () t -> UI t
         -- Could it be a bug? Surely if
         --   f (g x)
         -- is well typed then so too is

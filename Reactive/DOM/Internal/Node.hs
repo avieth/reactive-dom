@@ -15,6 +15,7 @@ Portability : non-portable (GHC only)
 {-# LANGUAGE RecursiveDo #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE StandaloneDeriving #-}
@@ -73,7 +74,7 @@ import Unsafe.Coerce
 --   Symbol which presumably is one of the W3C standard tag names.
 newtype ElementBuilder (tag :: Symbol) t = ElementBuilder {
       runElementBuilder
-          :: StateT ReadOnlyElement
+          :: StateT (ReadOnlyElement tag)
              (WriterT (Dual (Endo ElementSchema))
              MomentIO)
              t
@@ -91,8 +92,8 @@ buildElement
     :: forall tag t .
        ( )
     => ElementBuilder tag t
-    -> ReadOnlyElement
-    -> MomentIO (t, ReadOnlyElement, Dual (Endo ElementSchema))
+    -> ReadOnlyElement tag
+    -> MomentIO (t, ReadOnlyElement tag, Dual (Endo ElementSchema))
 buildElement extrinsic el = do
     ((t, el'), eschemaDualEndo)
         <- runWriterT (runStateT (runElementBuilder extrinsic) el)
@@ -222,12 +223,12 @@ tag :: Tag tag -> OpenWidget s t -> Widget tag s t
 tag = closeWidget
 
 data UI t where
-    UI :: W3CTagName tag => Tag tag -> Widget tag () t -> UI t
+    UI :: W3CTag tag => Tag tag -> Widget tag () t -> UI t
 
 instance Functor UI where
     fmap f (UI proxy w) = UI proxy (fmap f w)
 
-ui :: forall tag t . W3CTagName tag => Widget tag () t -> UI t
+ui :: forall tag t . W3CTag tag => Widget tag () t -> UI t
 ui = UI (Tag :: Tag tag)
 
 knot
@@ -334,7 +335,7 @@ makeChildrenInput document childrenOutput = mdo
 
 buildWidget
     :: forall tag s t .
-       ( W3CTagName tag )
+       ( W3CTag tag )
     => Widget tag s t
     -> s
     -> Document
@@ -347,8 +348,8 @@ buildWidget (Widget mk) s document = mdo
         <- buildElement ebuilder roelem
     (childrenInput, mutationSequence) <- makeChildrenInput document childrenOutput
     let eschema = appEndo (getDual eschemaDualEndo) $ emptySchema
-    _ <- runElementSchema eschema el
     _ <- reactimateChildren el mutationSequence
+    _ <- runElementSchema eschema document el
     liftIO (wireEvents roelem')
     pure (t, el)
 
@@ -376,21 +377,26 @@ render document parent ui = do
 
 -- | For use in ElementBuilder state. Gives access to certain features of
 --   a DOM element and holds deferred event bindings.
-data ReadOnlyElement = ReadOnlyElement {
+data ReadOnlyElement (tag :: Symbol) = ReadOnlyElement {
       getReadOnlyElement :: Element
-    , getEvents :: M.Map (DOMString, Bool) EventBinding
+    , getEvents :: M.Map (DOMString, Bool) (EventBinding tag)
     }
 
-data EventBinding where
+data EventBinding (tag :: Symbol) where
     EventBinding
-        :: forall e .
-           ( ElementEvent e )
+        :: forall e tag .
+           ( ElementEvent e tag )
         => Proxy e
         -> Event (EventData e)
         -> (EventData e -> IO ())
-        -> EventBinding
+        -> EventBinding tag
 
-runEventBinding :: Element -> (DOMString, Bool) -> EventBinding -> IO ()
+runEventBinding
+    :: forall tag .
+       Element
+    -> (DOMString, Bool)
+    -> EventBinding tag
+    -> IO ()
 runEventBinding el (eventName, fireWhenBubbled) (EventBinding (Proxy :: Proxy e) _ fire) = do
     let action :: EventM Element (DOMEvent e) ()
         action = do domEvent :: DOMEvent e <- EventM.event
@@ -399,7 +405,7 @@ runEventBinding el (eventName, fireWhenBubbled) (EventBinding (Proxy :: Proxy e)
                             Just "true" -> True
                             _ -> False
                     if (not bubbled) || (bubbled && fireWhenBubbled)
-                    then do d <- liftIO (eventData (Proxy :: Proxy e) el domEvent)
+                    then do d <- liftIO (eventData (Proxy :: Proxy e) (Proxy :: Proxy tag) el domEvent)
                             liftIO $ setJSProperty domEvent "bubbled" (Just "true")
                             liftIO $ fire d
                             pure ()
@@ -407,17 +413,17 @@ runEventBinding el (eventName, fireWhenBubbled) (EventBinding (Proxy :: Proxy e)
     on el (EventName eventName) action
     pure ()
 
-wireEvents :: ReadOnlyElement -> IO ()
+wireEvents :: ReadOnlyElement tag -> IO ()
 wireEvents (ReadOnlyElement el eventMap) =
     M.foldWithKey (\k v rest -> runEventBinding el k v >> rest) (pure ()) eventMap
 
 elementEvent
-    :: forall event .
-       ElementEvent event
+    :: forall event tag .
+       ElementEvent event tag
     => event
-    -> ReadOnlyElement
+    -> ReadOnlyElement tag
     -> Bool -- True if it should fire even when bubbled.
-    -> MomentIO (Event (EventData event), ReadOnlyElement)
+    -> MomentIO (Event (EventData event), ReadOnlyElement tag)
 elementEvent event roelement fireWhenBubbled = case existingBinding of
     -- unsafeCoerce is OK. We know ev must have the right type, because the
     -- only way it could have come to be here is if it was inserted for
@@ -430,7 +436,7 @@ elementEvent event roelement fireWhenBubbled = case existingBinding of
         pure (ev, roelement { getEvents = newEvents })
   where
     existingBinding = M.lookup (key, fireWhenBubbled) (getEvents roelement)
-    EventName key = eventName (Proxy :: Proxy event)
+    EventName key = eventName (Proxy :: Proxy event) (Proxy :: Proxy tag)
 
 -- | Since we don't want to allow `execute` in ElementBuilder, we offer a
 --   specialized way of using effectful events. Only IOEvents with benign
@@ -489,7 +495,7 @@ scrollWidth = ElementBuilder $ do
 -- TODO HasEvent tag event
 event
     :: forall event tag . 
-       ElementEvent event
+       ElementEvent event tag
     => event
     -> ElementBuilder tag (Event (EventData event))
 event ev = ElementBuilder $ do
@@ -501,58 +507,59 @@ event ev = ElementBuilder $ do
 class
     ( PToJSVal (DOMEvent event)
     , IsEvent (DOMEvent event)
-    ) => ElementEvent event
+    , W3CTag tag
+    ) => ElementEvent event (tag :: Symbol)
   where
     type EventData event :: *
     type DOMEvent event :: *
-    eventName :: Proxy event -> EventName Element (DOMEvent event)
-    eventData :: Proxy event -> Element -> DOMEvent event -> IO (EventData event)
+    eventName :: Proxy event -> Proxy tag -> EventName Element (DOMEvent event)
+    eventData :: Proxy event -> Proxy tag -> Element -> DOMEvent event -> IO (EventData event)
 
 data Click = Click
-instance ElementEvent Click where
+instance W3CTag tag => ElementEvent Click tag where
     type EventData Click = ()
     type DOMEvent Click = MouseEvent
-    eventName _ = Element.click
-    eventData _ _ _ = pure ()
+    eventName _ _ = Element.click
+    eventData _ _ _ _ = pure ()
 
 data Mouseenter = Mouseenter
-instance ElementEvent Mouseenter where
+instance W3CTag tag => ElementEvent Mouseenter tag where
     type EventData Mouseenter = ()
     type DOMEvent Mouseenter = MouseEvent
-    eventName _ = Element.mouseEnter
-    eventData _ _ _ = pure ()
+    eventName _ _ = Element.mouseEnter
+    eventData _ _ _ _ = pure ()
 
 data Mouseleave = Mouseleave
-instance ElementEvent Mouseleave where
+instance W3CTag tag => ElementEvent Mouseleave tag where
     type EventData Mouseleave = ()
     type DOMEvent Mouseleave = MouseEvent
-    eventName _ = Element.mouseLeave
-    eventData _ _ _ = pure ()
+    eventName _ _ = Element.mouseLeave
+    eventData _ _ _ _ = pure ()
 
 data Submit = Submit
-instance ElementEvent Submit where
+instance ElementEvent Submit "form" where
     type EventData Submit = ()
     type DOMEvent Submit = DOM.Types.Event
-    eventName _ = Element.submit
-    eventData _ _ _ = pure ()
+    eventName _ _ = Element.submit
+    eventData _ _ _ _ = pure ()
 
 data Input = Input
-instance ElementEvent Input where
+instance ElementEvent Input "input" where
     type EventData Input = T.Text
     type DOMEvent Input = DOM.Types.Event
-    eventName _ = Element.input
-    eventData _ el _ = maybe "" id <$> getValue (castToHTMLInputElement el)
+    eventName _ _ = Element.input
+    eventData _ _ el _ = maybe "" id <$> getValue (castToHTMLInputElement el)
 
 data Scroll = Scroll
 data ScrollData = ScrollData {
       scrollDataTop :: Int
     , scrollDataLeft :: Int
     }
-instance ElementEvent Scroll where
+instance W3CTag tag => ElementEvent Scroll tag where
     type EventData Scroll = ScrollData
     type DOMEvent Scroll = DOM.Types.UIEvent
-    eventName _ = Element.scroll
-    eventData _ el _ = ScrollData <$> getScrollTop el <*> getScrollLeft el
+    eventName _ _ = Element.scroll
+    eventData _ _ el _ = ScrollData <$> getScrollTop el <*> getScrollLeft el
 
 type Document = DOM.Types.Document
 type Element = DOM.Types.Element
@@ -619,12 +626,22 @@ data ElementSchema = ElementSchema {
     -- order to get what we want. For instance, using external libraries like
     -- Leaflet (map visualizations). We throw in the document for good
     -- measure.
-    --, elementSchemaPostprocess :: ElementSchemaPostprocess
+    , elementSchemaPostprocess :: Sequence MomentIO Postprocess
     }
 
-newtype ElementSchemaPostprocess = ElementSchemaPostprocess {
-      runElementSchemaPostprocess :: forall document . IsDocument document => document -> Element -> MomentIO ()
+newtype Postprocess = Postprocess {
+      runPostprocess :: Document -> Element -> IO ()
     }
+
+emptyPostprocess :: Postprocess
+emptyPostprocess = Postprocess (const (const (pure ())))
+
+sequencePostprocess
+    :: Postprocess
+    -> Postprocess
+    -> Postprocess
+sequencePostprocess (Postprocess f) (Postprocess g) = Postprocess $ \doc el ->
+    f doc el >> g doc el
 
 -- | An empty ElementSchema: no attributes, properties, style, children, etc.
 --   "div" is the chosen tag.
@@ -634,11 +651,11 @@ emptySchema =
     let props = always []
         attrs = always []
         style = always []
-        --postProcess = ElementSchemaPostprocess (\_ _ -> pure ())
+        postProcess = always emptyPostprocess
     in  ElementSchema props
                       attrs
                       style
-                      --postProcess
+                      postProcess
 
 schemaStyle
     :: Sequence MomentIO (Action Style)
@@ -682,9 +699,22 @@ schemaProperties actions schema = schema {
         -> Sequence MomentIO [Properties]
     mergeProperties actions seqnc = runAction <$> actions <*> seqnc
 
+schemaPostprocess
+    :: Sequence MomentIO Postprocess
+    -> ElementSchema
+    -> ElementSchema
+schemaPostprocess post schema = schema {
+      elementSchemaPostprocess = mergePostprocess post (elementSchemaPostprocess schema)
+    }
+  where
+    mergePostprocess
+        :: Sequence MomentIO Postprocess
+        -> Sequence MomentIO Postprocess
+        -> Sequence MomentIO Postprocess
+    mergePostprocess new existing = (flip sequencePostprocess) <$> new <*> existing
 
-runElementSchema :: ElementSchema -> Element -> MomentIO ()
-runElementSchema eschema el = do
+runElementSchema :: ElementSchema -> Document -> Element -> MomentIO ()
+runElementSchema eschema document el = do
     -- Reactimating these sequences probably causes a space leak. As far as I
     -- know, reactimating an event keeps that event alive... seems that's how
     -- it has to be.
@@ -695,9 +725,14 @@ runElementSchema eschema el = do
     reactimateProperties el (elementSchemaProperties eschema)
     reactimateAttributes el (elementSchemaAttributes eschema)
     reactimateStyle el (elementSchemaStyle eschema)
+    reactimatePostprocess document el (elementSchemaPostprocess eschema)
     pure ()
 
   where
+
+    reactimatePostprocess :: Document -> Element -> Sequence MomentIO Postprocess -> MomentIO ()
+    reactimatePostprocess document element sequence = do
+        sequenceReactimate ((\x -> runPostprocess x document element) <$> sequence)
 
     reactimateProperties :: Element -> Sequence MomentIO [Properties] -> MomentIO ()
     reactimateProperties element sequence = do
@@ -822,23 +857,17 @@ getJSProperty thing key = nullableToMaybe <$> js_getJSProperty (pToJSVal thing) 
 removeJSProperty :: PToJSVal thing => thing -> JSString -> IO (Maybe JSString)
 removeJSProperty thing x = nullableToMaybe <$> js_removeJSProperty (pToJSVal thing) x
 
-{-
-schemaPostprocess
-    :: ElementSchemaPostprocess
-    -> ElementSchema f
-    -> ElementSchema f
-schemaPostprocess post schema = schema {
-      elementSchemaPostprocess = post
-    }
--}
-
 style
-    :: Sequence MomentIO (Action Style)
+    :: W3CTag tag
+    => Sequence MomentIO (Action Style)
     -> ElementBuilder tag ()
 style s = ElementBuilder $ lift (tell (Dual (Endo (schemaStyle s))))
 
 styleHover
-    :: Style
+    :: ( ElementEvent Mouseenter tag
+       , ElementEvent Mouseleave tag
+       )
+    => Style
     -> ElementBuilder tag ()
 styleHover s = do
     enterev <- event Mouseenter
@@ -849,15 +878,22 @@ styleHover s = do
     pure ()
 
 attributes
-    :: Sequence MomentIO (Action Attributes)
+    :: W3CTag tag
+    => Sequence MomentIO (Action Attributes)
     -> ElementBuilder tag ()
 attributes a = ElementBuilder $ lift (tell (Dual (Endo (schemaAttributes a))))
 
 properties
-    :: Sequence MomentIO (Action Properties)
+    :: W3CTag tag
+    => Sequence MomentIO (Action Properties)
     -> ElementBuilder tag ()
 properties p = ElementBuilder $ lift (tell (Dual (Endo (schemaProperties p))))
 
+postprocess
+    :: W3CTag tag
+    => Sequence MomentIO Postprocess
+    -> ElementBuilder tag ()
+postprocess p = ElementBuilder $ lift (tell (Dual (Endo (schemaPostprocess p))))
 
 makeText :: Document -> T.Text -> MomentIO Text
 makeText document txt = do
