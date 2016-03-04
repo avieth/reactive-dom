@@ -9,6 +9,8 @@ Portability : non-portable (GHC only)
 -}
 
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE RankNTypes #-}
 
 module Examples.Calculator where
 
@@ -20,13 +22,14 @@ import Reactive.DOM.Widget.Primitive
 import Reactive.DOM.Children.NodeList
 import Reactive.DOM.Children.Algebraic
 import qualified Data.Text as T
+import Data.Profunctor
 
 -- | A reactive calculator Widget. The sum of 2 numbers is shown.
 --
 --   We start with a composite of 4 Widgets, compute in a MonadMoment with
 --   their output via rmap', then loop that output back to its input via
 --   tie (we tie the knot).
-calculator :: Widget () (Event (Maybe Double))
+calculator :: OpenWidget () (Event (Maybe Double))
 calculator = tie (rmap' makeOutput composite) (pure . tieKnot)
 
   where
@@ -34,14 +37,14 @@ calculator = tie (rmap' makeOutput composite) (pure . tieKnot)
     -- A composite of 4 Widgets: number input, plus sign, number input,
     -- number output. Their inputs and outputs are clumsily bundled into
     -- tuples.
-    composite :: Widget ((), ((), ((), (T.Text, Event T.Text))))
-                        (Event (Maybe Double), ((), (Event (Maybe Double), ())))
+    composite :: OpenWidget ((), ((), ((), (T.Text, Event T.Text))))
+                            (Event (Maybe Double), ((), (Event (Maybe Double), ())))
     composite =
-        (liftUI numberInput)
+        (openWidget numberInput)
         `widgetProduct`
-        ((liftUI plusSign)
+        ((openWidget plusSign)
         `widgetProduct`
-        (((liftUI numberInput)
+        (((openWidget numberInput)
         `widgetProduct`
         numberOutput)))
 
@@ -67,18 +70,21 @@ calculator = tie (rmap' makeOutput composite) (pure . tieKnot)
     tieKnot :: Event (Maybe Double) -> ((), ((), ((), (T.Text, Event T.Text))))
     tieKnot ev = ((), ((), ((), ("", maybe "Bad input" (T.pack . show) <$> ev))))
 
-    numberInput :: UI (Event (Maybe Double))
+    numberInput :: Widget "input" () (Event (Maybe Double))
     numberInput = (fmap . fmap) readDouble textInput
 
-    plusSign :: UI ()
-    plusSign = span (constantText " + ")
+    plusSign :: Widget "span" () ()
+    plusSign = span (lmap (const " + ") constantText)
 
-    numberOutput :: Widget (T.Text, Event T.Text) ()
+    numberOutput :: OpenWidget (T.Text, Event T.Text) ()
     numberOutput = widget $ \(~(initialTxt, evTxt), _) -> pure (
           ()
-        , children (nodeList [newChild (span (constantText initialTxt))])
-                   (pure . nodeList . pure . newChild . span . constantText <$> evTxt)
+        , children (nodeList [makeChild initialTxt])
+                   (pure . nodeList . pure . makeChild <$> evTxt)
         )
+      where
+        makeChild :: T.Text -> SetChild ()
+        makeChild txt = newChild (ui (span (lmap (const txt) constantText)))
 
     readDouble :: T.Text -> Maybe Double
     readDouble txt = case reads (T.unpack txt) of

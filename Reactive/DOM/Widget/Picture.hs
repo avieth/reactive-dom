@@ -9,6 +9,7 @@ Portability : non-portable (GHC only)
 -}
 
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE DataKinds #-}
 
 module Reactive.DOM.Widget.Picture (
 
@@ -46,10 +47,9 @@ dataUri duri = T.concat [
     ]
 
 -- | A static picture.
-picture :: PictureSource -> UI ()
-picture sdatauri = ui "img" $ widget $ \_ -> do
-    attributes attrs
+picture :: Widget "img" PictureSource ()
+picture = closeWidget (Tag :: Tag "img") $ widget $ \(~(psource, _)) -> do
+    attributes (always (mkAttributes psource))
     pure ((), constantChildren (Static (nodeList [])))
   where
     mkAttributes (PictureSourceDataUri duri) = Set (makeAttributes [("src", dataUri duri)])
-    attrs = always (mkAttributes sdatauri)

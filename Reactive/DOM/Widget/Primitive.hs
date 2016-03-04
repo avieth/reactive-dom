@@ -9,6 +9,8 @@ Portability : non-portable (GHC only)
 -}
 
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE RankNTypes #-}
 
 module Reactive.DOM.Widget.Primitive where
 
@@ -16,43 +18,47 @@ import qualified Data.Text as T
 import Reactive.DOM.Node
 import Reactive.DOM.Children.Static
 import Reactive.DOM.Children.NodeList
+import Reactive.DOM.Children.Single
 import Reactive.Banana.Combinators
 import Reactive.Sequence
+import Data.Profunctor
 
-emptyWidget :: Widget () ()
+emptyWidget :: OpenWidget () ()
 emptyWidget = widget $ \_ -> pure ((), constantChildren (Static (nodeList [])))
 
-constantText :: T.Text -> Widget () ()
-constantText txt = widget $ \_ ->
-    pure ((), constantChildren (Static (nodeList [textChild txt])))
+varyingText :: OpenWidget (T.Text, Event T.Text) ()
+varyingText = widget $ \(~((txt, evTxt), _)) ->
+    pure ((), children (Single (textChild txt)) (pure . Single . textChild <$> evTxt))
 
-varyingText :: (T.Text, Event T.Text) -> Widget () ()
-varyingText (txt, evTxt) = widget $ \_ ->
-    pure ((), children (nodeList [textChild txt]) (pure . nodeList . pure . textChild <$> evTxt))
+constantText :: OpenWidget T.Text ()
+constantText = lmap (\t -> (t, never)) varyingText
 
-div :: Widget () t -> UI t
-div = ui "div"
+div :: OpenWidget s t -> Widget "div" s t
+div = closeWidget (Tag :: Tag "div")
 
-p :: Widget () t -> UI t
-p = ui "p"
+p :: OpenWidget s t -> Widget "p" s t
+p = closeWidget (Tag :: Tag "p")
 
-span :: Widget () t -> UI t
-span = ui "span"
+span :: OpenWidget s t -> Widget "span" s t
+span = closeWidget (Tag :: Tag "span")
 
-button :: Widget () t -> UI t
-button = ui "button"
+button :: OpenWidget s t -> Widget "button" s t
+button = closeWidget (Tag :: Tag "button")
+
+input :: OpenWidget s t -> Widget "input" s t
+input = closeWidget (Tag :: Tag "input")
 
 -- | A button which shows text and gives a click event.
-simpleButton :: T.Text -> UI (Event ())
-simpleButton txt = button (constantText txt) `modify` modifier (const (event Click))
+simpleButton :: Widget "button" T.Text (Event ())
+simpleButton = button constantText `modify` modifier (const (event Click))
 
 -- | The text displayed here is not determined by children, but by the value
 --   property, so it can be played with through the Modification interface.
-textInput :: UI (Event T.Text)
-textInput = ui "input" emptyWidget `modify` modifier (const (event Input))
+textInput :: Widget "input" () (Event T.Text)
+textInput = input emptyWidget `modify` modifier (const (event Input))
 
 -- | Same as textInput but we set the type attribute to password for you.
-passwordInput :: UI (Event T.Text)
+passwordInput :: Widget "input" () (Event T.Text)
 passwordInput = textInput `modify` modifier setPasswordType
   where
     setPasswordType event = attributes (always (Set attrs)) >> pure event

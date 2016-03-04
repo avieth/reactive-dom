@@ -21,10 +21,12 @@ Portability : non-portable (GHC only)
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE PolyKinds #-}
+{-# LANGUAGE DataKinds #-}
 
 module Reactive.DOM.Internal.Node where
 
 import Prelude hiding ((.), id, span)
+import GHC.TypeLits (Symbol)
 import Control.Category
 import Control.Monad
 import Control.Monad.IO.Class
@@ -61,13 +63,15 @@ import GHCJS.DOM.HTMLInputElement (getValue)
 import Reactive.Banana.Combinators
 import Reactive.Banana.Frameworks
 import Reactive.Sequence
+import Reactive.DOM.Internal.Tag
 import Reactive.DOM.Internal.Mutation
 import Reactive.DOM.Internal.ChildrenContainer
 import System.IO.Unsafe
 import Unsafe.Coerce
 
--- | A monad in which DOM elements are described.
-newtype ElementBuilder t = ElementBuilder {
+-- | A monad in which DOM elements are described. It's parameterized by a
+--   Symbol which presumably is one of the W3C standard tag names.
+newtype ElementBuilder (tag :: Symbol) t = ElementBuilder {
       runElementBuilder
           :: StateT ReadOnlyElement
              (WriterT (Dual (Endo ElementSchema))
@@ -75,18 +79,18 @@ newtype ElementBuilder t = ElementBuilder {
              t
     }
 
-deriving instance Functor ElementBuilder
-deriving instance Applicative ElementBuilder
-deriving instance Monad ElementBuilder
-deriving instance MonadFix ElementBuilder
-instance MonadMoment ElementBuilder where
+deriving instance Functor (ElementBuilder tag)
+deriving instance Applicative (ElementBuilder tag)
+deriving instance Monad (ElementBuilder tag)
+deriving instance MonadFix (ElementBuilder tag)
+instance MonadMoment (ElementBuilder tag) where
     liftMoment = ElementBuilder . lift . lift . liftMoment
 
 -- | Run an ElementBuilder.
 buildElement
-    :: forall t .
+    :: forall tag t .
        ( )
-    => ElementBuilder t
+    => ElementBuilder tag t
     -> ReadOnlyElement
     -> MomentIO (t, ReadOnlyElement, Dual (Endo ElementSchema))
 buildElement extrinsic el = do
@@ -94,7 +98,7 @@ buildElement extrinsic el = do
         <- runWriterT (runStateT (runElementBuilder extrinsic) el)
     pure (t, el', eschemaDualEndo)
 
-liftMomentIO :: MomentIO t -> ElementBuilder t
+liftMomentIO :: MomentIO t -> ElementBuilder tag t
 liftMomentIO = ElementBuilder . lift . lift
 
 newtype Child t = Child {
@@ -150,7 +154,7 @@ data ViewChildren f = ViewChildren {
     , viewChildrenEvent :: Event (f Child)
     }
 
-viewChildrenBehavior :: ViewChildren f -> ElementBuilder (Behavior (f Child))
+viewChildrenBehavior :: ViewChildren f -> ElementBuilder tag (Behavior (f Child))
 viewChildrenBehavior viewChildren = ElementBuilder $
     (lift . lift) (stepper (viewChildrenInitial viewChildren) (viewChildrenEvent viewChildren))
 
@@ -165,67 +169,78 @@ viewChildrenTrans trans transc (ViewChildren a b c) = ViewChildren a' b' c'
     b' = transc <$> b
     c' = trans <$> c
 
-data Widget s t where
+data Widget (tag :: Symbol) s t where
     Widget
         :: ( ChildrenContainer f )
         => (  (s, ViewChildren f)
-           -> ElementBuilder (t, Children f)
+           -> ElementBuilder tag (t, Children f)
            )
-        -> Widget s t
+        -> Widget tag s t
 
-instance Functor (Widget s) where
+instance Functor (Widget tag s) where
     fmap f (Widget mk) = Widget $ \(s, c) -> do
         (t, c') <- mk (s, c)
         pure (f t, c')
 
-instance Profunctor Widget where
+instance Profunctor (Widget tag) where
     dimap l r (Widget mk) = Widget $ \(s, c) -> do
         (t, c') <- mk (l s, c)
         pure (r t, c')
 
 -- | Like dimap, but we allow you to MomentIO.
-dimap' :: (q -> ElementBuilder s) -> (t -> ElementBuilder u) -> Widget s t -> Widget q u
+dimap'
+    :: (q -> ElementBuilder tag s)
+    -> (t -> ElementBuilder tag u)
+    -> Widget tag s t
+    -> Widget tag q u
 dimap' l r (Widget mk) = Widget $ \(q, c) -> do
     s <- l q
     (t, c') <- mk (s, c)
     u <- r t
     pure (u, c')
 
-lmap' :: (q -> ElementBuilder s) -> Widget s t -> Widget q t
+lmap' :: (q -> ElementBuilder tag s) -> Widget tag s t -> Widget tag q t
 lmap' l = dimap' l pure
 
-rmap' :: (t -> ElementBuilder u) -> Widget s t -> Widget s u
+rmap' :: (t -> ElementBuilder tag u) -> Widget tag s t -> Widget tag s u
 rmap' r = dimap' pure r
 
 widget
     :: ( ChildrenContainer f )
     => (  (s, ViewChildren f)
-       -> ElementBuilder (t, Children f)
+       -> ElementBuilder tag (t, Children f)
        )
-    -> Widget s t
+    -> Widget tag s t
 widget = Widget
 
-newtype UI t = UI {
-      runUI :: (Tag, Widget () t)
-    }
+type OpenWidget s t = forall tag . Widget tag s t
+
+closeWidget :: Tag tag -> OpenWidget s t -> Widget tag s t
+closeWidget _ w = w
+
+tag :: Tag tag -> OpenWidget s t -> Widget tag s t
+tag = closeWidget
+
+data UI t where
+    UI :: W3CTagName tag => Tag tag -> Widget tag () t -> UI t
 
 instance Functor UI where
-    fmap f (UI (tag, w)) = UI (tag, fmap f w)
+    fmap f (UI proxy w) = UI proxy (fmap f w)
 
-ui :: Tag -> Widget () t -> UI t
-ui tag = UI . (,) tag
+ui :: forall tag t . W3CTagName tag => Widget tag () t -> UI t
+ui = UI (Tag :: Tag tag)
 
 knot
-    :: Widget t t
-    -> Widget () t
+    :: Widget tag t t
+    -> Widget tag () t
 knot (Widget mk) = Widget $ \(_, viewChildren) -> mdo
     (t, setChildren) <- mk (t, viewChildren)
     pure (t, setChildren)
 
 tie
-    :: Widget s t
-    -> (t -> ElementBuilder s)
-    -> Widget () t
+    :: Widget tag s t
+    -> (t -> ElementBuilder tag s)
+    -> Widget tag () t
 tie (Widget mk) f = Widget $ \(_, viewChildren) -> mdo
     (t, setChildren) <- mk (s, viewChildren)
     s <- f t
@@ -234,37 +249,38 @@ tie (Widget mk) f = Widget $ \(_, viewChildren) -> mdo
 -- | A modifier uses the output, model, and children of some Widget to
 --   alter the output. It cannot change the model nor the children, just the
 --   output value and type.
-newtype Modifier s t = Modifier {
-      runModifier :: s -> ElementBuilder t
+newtype Modifier tag s t = Modifier {
+      runModifier :: s -> ElementBuilder tag t
     }
 
-instance Functor (Modifier s) where
+instance Functor (Modifier tag s) where
     fmap f = Modifier . (fmap . fmap) f . runModifier
 
-instance Applicative (Modifier s) where
+instance Applicative (Modifier tag s) where
     pure = Modifier . pure . pure
     (Modifier mf) <*> (Modifier mx) = Modifier $ \s ->
         ($) <$> mf s <*> mx s
 
-instance Monad (Modifier s) where
+instance Monad (Modifier tag s) where
     return = pure
     (Modifier mx) >>= k = Modifier $ \s -> do
         y <- mx s
         runModifier (k y) s
 
-modifier :: (s -> ElementBuilder t) -> Modifier s t
+modifier :: (s -> ElementBuilder tag t) -> Modifier tag s t
 modifier = Modifier
 
 modify
-    :: UI s
-    -> Modifier s t
-    -> UI t
-modify (UI (tag, (Widget mk))) modifier = UI (tag, Widget mk')
+    :: forall tag s t u .
+       Widget tag s t
+    -> Modifier tag t u
+    -> Widget tag s u
+modify (Widget mk) modifier = Widget mk'
   where
-    mk' ((), viewChildren) = do
-        (s, setChildren) <- mk ((), viewChildren)
-        t <- runModifier modifier s
-        pure (t, setChildren)
+    mk' (s, viewChildren) = do
+        (t, setChildren) <- mk (s, viewChildren)
+        u <- runModifier modifier t
+        pure (u, setChildren)
 
 makeChildrenInput
     :: forall f r .
@@ -317,13 +333,14 @@ makeChildrenInput document childrenOutput = mdo
          )
 
 buildWidget
-    :: Widget s t
-    -> Tag
+    :: forall tag s t .
+       ( W3CTagName tag )
+    => Widget tag s t
     -> s
     -> Document
     -> MomentIO (t, Element)
-buildWidget (Widget mk) tag s document = mdo
-    Just el <- document `createElement` Just tag
+buildWidget (Widget mk) s document = mdo
+    Just el <- document `createElement` Just (w3cTagName (Tag :: Tag tag))
     let ebuilder = mk (s, childrenInput)
     let roelem = ReadOnlyElement el M.empty
     ((t, childrenOutput), roelem', eschemaDualEndo)
@@ -336,7 +353,7 @@ buildWidget (Widget mk) tag s document = mdo
     pure (t, el)
 
 buildUI :: UI t -> Document -> MomentIO (t, Element)
-buildUI (UI (tag, widget)) = buildWidget widget tag ()
+buildUI (UI _ widget) = buildWidget widget ()
 
 reactimateChildren
     :: Element
@@ -426,12 +443,12 @@ deriving instance Functor IOEvent
 deriving instance Applicative IOEvent
 deriving instance Monad IOEvent
 
-ioEvent :: IOEvent (s -> t) -> Event s -> ElementBuilder (Event t)
+ioEvent :: IOEvent (s -> t) -> Event s -> ElementBuilder tag (Event t)
 ioEvent ioevent ev = ElementBuilder $ do
     let io = runIOEvent ioevent
     lift . lift $ (execute (liftIO . (<*>) io . pure <$> ev))
 
-clientRect :: ElementBuilder (IOEvent ClientRect)
+clientRect :: ElementBuilder tag (IOEvent ClientRect)
 clientRect = ElementBuilder $ do
     roelem <- get
     let el = getReadOnlyElement roelem
@@ -439,41 +456,42 @@ clientRect = ElementBuilder $ do
                    pure rect
     pure (IOEvent getIt)
 
-clientHeight :: ElementBuilder (IOEvent Double)
+clientHeight :: ElementBuilder tag (IOEvent Double)
 clientHeight = ElementBuilder $ do
     el <- get
     pure (IOEvent (getClientHeight (getReadOnlyElement el)))
 
-clientWidth :: ElementBuilder (IOEvent Double)
+clientWidth :: ElementBuilder tag (IOEvent Double)
 clientWidth = ElementBuilder $ do
     el <- get
     pure (IOEvent (getClientWidth (getReadOnlyElement el)))
 
-offsetHeight :: ElementBuilder (IOEvent Double)
+offsetHeight :: ElementBuilder tag (IOEvent Double)
 offsetHeight = ElementBuilder $ do
     el <- get
     pure (IOEvent (getOffsetHeight (getReadOnlyElement el)))
 
-offsetWidth :: ElementBuilder (IOEvent Double)
+offsetWidth :: ElementBuilder tag (IOEvent Double)
 offsetWidth = ElementBuilder $ do
     el <- get
     pure (IOEvent (getOffsetWidth (getReadOnlyElement el)))
 
-scrollHeight :: ElementBuilder (IOEvent Int)
+scrollHeight :: ElementBuilder tag (IOEvent Int)
 scrollHeight = ElementBuilder $ do
     el <- get
     pure (IOEvent (getScrollHeight (getReadOnlyElement el)))
 
-scrollWidth :: ElementBuilder (IOEvent Int)
+scrollWidth :: ElementBuilder tag (IOEvent Int)
 scrollWidth = ElementBuilder $ do
     el <- get
     pure (IOEvent (getScrollWidth (getReadOnlyElement el)))
 
+-- TODO HasEvent tag event
 event
-    :: forall event . 
+    :: forall event tag . 
        ElementEvent event
     => event
-    -> ElementBuilder (Event (EventData event))
+    -> ElementBuilder tag (Event (EventData event))
 event ev = ElementBuilder $ do
     roelem <- get
     (ev, roelem') <- (lift . lift) (elementEvent ev roelem False)
@@ -589,9 +607,6 @@ computeProperties = computeStyle
 
 computeAttributes :: [Attributes] -> M.Map T.Text T.Text
 computeAttributes = computeStyle
-
--- | TBD make an ADT for this with standard HTML5 tags?
-type Tag = T.Text
 
 type ElementSchemaChild = Either Element Text
 
@@ -819,12 +834,12 @@ schemaPostprocess post schema = schema {
 
 style
     :: Sequence MomentIO (Action Style)
-    -> ElementBuilder ()
+    -> ElementBuilder tag ()
 style s = ElementBuilder $ lift (tell (Dual (Endo (schemaStyle s))))
 
 styleHover
     :: Style
-    -> ElementBuilder ()
+    -> ElementBuilder tag ()
 styleHover s = do
     enterev <- event Mouseenter
     leaveev <- event Mouseleave
@@ -835,12 +850,12 @@ styleHover s = do
 
 attributes
     :: Sequence MomentIO (Action Attributes)
-    -> ElementBuilder ()
+    -> ElementBuilder tag ()
 attributes a = ElementBuilder $ lift (tell (Dual (Endo (schemaAttributes a))))
 
 properties
     :: Sequence MomentIO (Action Properties)
-    -> ElementBuilder ()
+    -> ElementBuilder tag ()
 properties p = ElementBuilder $ lift (tell (Dual (Endo (schemaProperties p))))
 
 

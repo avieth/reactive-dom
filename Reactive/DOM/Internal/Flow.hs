@@ -36,6 +36,7 @@ import Data.Algebraic.Product hiding (Component)
 import Reactive.Banana.Combinators
 import Reactive.Banana.Frameworks
 import Reactive.Sequence
+import Reactive.DOM.Internal.Tag (W3CTagName)
 import Reactive.DOM.Internal.Node
 import Reactive.DOM.Children.Single
 
@@ -44,14 +45,6 @@ import Reactive.DOM.Children.Single
 data Flow o s t where
     FlowMoment :: (s -> MomentIO t) -> Flow o s t
     FlowUI :: (s -> UI (o, Event t)) -> Flow o s t
-    -- | A time-varying Flow. The Behavior must be derived from the Event
-    --   via stepper.
-    --   Removed. TBD is it worth having? We have impure flows, so we can
-    --   simulate the idea of taking the some current value and using it to
-    --   give a flow. And the other aspect of varying flows is that they give
-    --   a second way of inducing a flow change (the other way is from
-    --   FlowUI's event). Maybe having 2 ways is not such a good idea.
-    --FlowVarying :: (Behavior (Flow o s t), Event (Flow o s t)) -> Flow o s t
     -- | Symbolic composition.
     FlowCompose :: Flow o u t -> Flow o s u -> Flow o s t
     -- | Symbol first, for Arrow.
@@ -90,19 +83,11 @@ pureFlow f = FlowMoment $ pure . f
 impureFlow :: (s -> MomentIO t) -> Flow o s t
 impureFlow = FlowMoment
 
-{-
-varyingFlow :: MonadMoment m => Sequence m (Flow o s t) -> m (Flow o s t)
-varyingFlow seqnc = do
-    (first, rest) <- runSequence seqnc
-    b <- stepper first rest
-    pure $ FlowVarying (b, rest)
--}
-
 uiFlow :: (s -> UI (o, Event t)) -> Flow o s t
 uiFlow = FlowUI
 
-uiFlow' :: UI (Event t) -> Flow o o t
-uiFlow' mk = FlowUI $ \o -> mk `modify` modifier (\ev -> pure (o, ev))
+uiFlow' :: W3CTagName tag => Widget tag () (Event t) -> Flow o o t
+uiFlow' mk = FlowUI $ \o -> ui (mk `modify` modifier (\ev -> pure (o, ev)))
 
 flowMap :: (o -> o') -> Flow o s t -> Flow o' s t
 flowMap f flow = case flow of
@@ -275,9 +260,8 @@ runFlowGeneral flow k = case flow of
 runFlow
     :: forall o s .
        Flow o s Void
-    -> s
-    -> Widget () (Sequence MomentIO o)
-runFlow flow s = widget $ \(_, viewChildren) -> do
+    -> OpenWidget s (Sequence MomentIO o)
+runFlow flow = widget $ \(s, viewChildren) -> do
 
     let first :: (o, Event (MomentIO (Either Void (FlowContinuation o Void))))
         rest :: Event (o, Event (MomentIO (Either Void (FlowContinuation o Void))))

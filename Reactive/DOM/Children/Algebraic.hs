@@ -14,6 +14,7 @@ Portability : non-portable (GHC only)
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE RecursiveDo #-}
+{-# LANGUAGE RankNTypes #-}
 
 module Reactive.DOM.Children.Algebraic where
 
@@ -109,7 +110,10 @@ instance
 -- | Combine two widgets in such a way that their children share the same
 --   DOM element. The elements of the left one come before the elements of the
 --   right one in the DOM node ordering. You get both of their outputs.
-widgetProduct :: Widget s1 t1 -> Widget s2 t2 -> Widget (s1, s2) (t1, t2)
+widgetProduct
+    :: OpenWidget s1 t1
+    -> OpenWidget s2 t2
+    -> OpenWidget (s1, s2) (t1, t2)
 widgetProduct (Widget mk1) (Widget mk2) = widget $ \(~((s1, s2), viewChildren)) -> do
     let transLeft :: forall f left right . Product left right f -> left f
         transLeft (~(Product (left, _))) = left

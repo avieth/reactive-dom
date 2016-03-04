@@ -323,13 +323,12 @@ routePath
     -> T.Text
 routePath route = T.cons '/' . mconcat . intersperse (T.pack "/") . routePathParts route
 
-
 webApp
     :: ( MatchRoute router router )
     => Window
     -> Router router
     -> WebAppFlow router () Void -- route doesn't match, use this.
-    -> Widget () ()
+    -> OpenWidget () ()
 webApp window router notFound = widget $ \_ -> do
     liftMomentIO (liftIO (putStrLn "webApp : setting up"))
     (rest, fire) <- liftMomentIO newEvent
@@ -348,8 +347,20 @@ webApp window router notFound = widget $ \_ -> do
     let seqnc :: Sequence MomentIO (Flow () () Void)
         seqnc = first |> rest
     liftMomentIO (sequenceReactimate (const (putStrLn "webApp : flow changing") <$> seqnc))
+    let makeUI :: Flow () () Void -> UI (Sequence MomentIO ())
+        makeUI flow = ui (div (runFlow flow))
+        -- NB the following will not typecheck.
+        --   makeUI = ui . div . runFlow
+        -- Why?
+        --   runFlow :: Flow o s Void -> (forall tag . Widget tag s (Sequence MomentIO o))
+        --   div :: (forall tag . Widget tag s t) -> Widget "div" s t
+        --   ui :: forall tag t . W3CTagName tag => Widget tag () t -> UI t
+        -- Could it be a bug? Surely if
+        --   f (g x)
+        -- is well typed then so too is
+        --   f . g
     let childrenSequence :: Sequence MomentIO (NodeList (Sequence MomentIO ()) SetChild)
-        childrenSequence = nodeList . pure . newChild . div . flip runFlow () <$> seqnc
+        childrenSequence = nodeList . pure . newChild . makeUI <$> seqnc
     (firstChild, restChild) <- liftMomentIO (runSequence childrenSequence)
     pure ((), children firstChild (pure <$> restChild))
 

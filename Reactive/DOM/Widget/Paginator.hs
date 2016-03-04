@@ -11,6 +11,8 @@ Portability : non-portable (GHC only)
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecursiveDo #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE DataKinds #-}
 
 module Reactive.DOM.Widget.Paginator where
 
@@ -57,8 +59,8 @@ prependIncrement t = (Sum 1, t)
 paginator
     :: forall t .
        ( Monoid t )
-    => Widget (PaginatorInput t, Event (PaginatorInput t))
-              ((t, Event t), Event PaginatorOutput)
+    => OpenWidget (PaginatorInput t, Event (PaginatorInput t))
+                  ((t, Event t), Event PaginatorOutput)
 paginator = lmap makeInput (rmap' makeOutput product)
   where
 
@@ -73,7 +75,7 @@ paginator = lmap makeInput (rmap' makeOutput product)
         Exhausted _ -> Complete
         Expect -> Fetching
 
-    loadingButton :: Widget (PaginatorState, Event PaginatorState) (Event ())
+    loadingButton :: OpenWidget (PaginatorState, Event PaginatorState) (Event ())
     loadingButton = widget $ \((initialState, evState), viewChildren) -> do
         let getClickEvent :: NodeList (Event ()) Child -> Event ()
             getClickEvent (NodeList []) = never
@@ -94,8 +96,8 @@ paginator = lmap makeInput (rmap' makeOutput product)
     -- widget which is either a button to fetch more, a loading indicator, or
     -- nothing (in case the paginator is exhausted).
     -- That second component is a function of a PaginatorState.
-    product :: Widget (([UI (Sum Int, t)], Event [UI (Sum Int, t)]), (PaginatorState, Event PaginatorState))
-                      (((Sum Int, t), Event (Sum Int, t)), Event ())
+    product :: OpenWidget (([UI (Sum Int, t)], Event [UI (Sum Int, t)]), (PaginatorState, Event PaginatorState))
+                          (((Sum Int, t), Event (Sum Int, t)), Event ())
     product = monotoneListWidget `widgetProduct` loadingButton
 
     -- How to come up with the current offset?
@@ -115,7 +117,7 @@ paginator = lmap makeInput (rmap' makeOutput product)
 
     makeOutput
         :: (((Sum Int, t), Event (Sum Int, t)), Event ())
-        -> ElementBuilder ((t, Event t), Event PaginatorOutput)
+        -> ElementBuilder tag ((t, Event t), Event PaginatorOutput)
     makeOutput (~((x1, y1), click)) = do
         let initialT = snd x1
         let evT = snd <$> y1
@@ -126,7 +128,7 @@ paginator = lmap makeInput (rmap' makeOutput product)
         pure ((initialT, evT), output)
 
     button :: UI (Event ())
-    button = span (rmap' (const (event Click)) (constantText "Get more"))
+    button = ui (span (lmap (const "Get more") (rmap' (const (event Click)) constantText)))
 
     loading :: UI (Event ())
-    loading = span (rmap' (const (pure never)) (constantText "Loading..."))
+    loading = ui (span (lmap (const "Loading...") (rmap' (const (pure never)) constantText)))

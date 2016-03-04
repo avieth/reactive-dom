@@ -11,7 +11,7 @@ Portability : non-portable (GHC only)
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE Arrows #-}
 
-import Prelude hiding ((.), id)
+import Prelude hiding ((.), id, div)
 import Control.Category
 import Control.Arrow
 import Data.Void
@@ -23,6 +23,7 @@ import Reactive.Banana.Combinators
 import Reactive.Banana.Frameworks
 import Reactive.Sequence
 import Reactive.DOM.Node
+import Reactive.DOM.Widget.Primitive
 import Examples.Calculator
 
 main :: IO ()
@@ -34,7 +35,7 @@ main = runWebGUI $ \webView -> do
     let networkDescription :: MomentIO ()
         networkDescription = do
 
-            (_, calculatorEvent) <- render document body (ui "div" calculator)
+            (_, calculatorEvent) <- render document body (ui (div calculator))
             reactimate (Prelude.print <$> calculatorEvent)
 
             pure ()

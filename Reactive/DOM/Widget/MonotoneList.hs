@@ -33,7 +33,7 @@ import Reactive.DOM.Children.MonotoneList
 monotoneListWidget
     :: forall t .
        ( Monoid t )
-    => Widget ([UI t], Event [UI t]) (t, Event t)
+    => OpenWidget ([UI t], Event [UI t]) (t, Event t)
 monotoneListWidget = widget $ \(~((initial, changes), viewChildren :: ViewChildren (MonotoneList t))) -> mdo
 
     -- Use the ViewChildren to come up with the output sequence.
