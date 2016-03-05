@@ -18,7 +18,7 @@ import Prelude hiding (span)
 import Reactive.Banana.Combinators
 import Reactive.Banana.Frameworks
 import Reactive.DOM.Node
-import Reactive.DOM.Widget.Primitive
+import Reactive.DOM.Widget.Common
 import Reactive.DOM.Children.NodeList
 import Reactive.DOM.Children.Algebraic
 import qualified Data.Text as T

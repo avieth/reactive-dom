@@ -18,6 +18,7 @@ module Reactive.DOM.Node (
     , ElementBuilder
     , liftMomentIO
     , Tag(..)
+    , W3CTag
     , Widget
     , OpenWidget
     , widget

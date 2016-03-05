@@ -23,7 +23,7 @@ import Reactive.Banana.Combinators
 import Reactive.Banana.Frameworks
 import Reactive.Sequence
 import Reactive.DOM.Node
-import Reactive.DOM.Widget.Primitive
+import Reactive.DOM.Widget.Common
 import Examples.Calculator
 
 main :: IO ()
