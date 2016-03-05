@@ -48,6 +48,9 @@ instance W3CTag "h3" where
 instance W3CTag "h4" where
     w3cTagName _ = "h4"
 
+instance W3CTag "hr" where
+    w3cTagName _ = "hr"
+
 --type Input = Tag "input"
 instance W3CTag "input" where
     w3cTagName _ = "input"

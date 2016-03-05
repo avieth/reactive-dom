@@ -51,6 +51,9 @@ input = closeWidget (Tag :: Tag "input")
 form :: OpenWidget s t -> Widget "form" s t
 form = closeWidget (Tag :: Tag "form")
 
+hr :: Widget "hr" () ()
+hr = closeWidget (Tag :: Tag "hr") emptyWidget
+
 -- | A button which shows text and gives a click event.
 simpleButton :: Widget "button" T.Text (Event ())
 simpleButton = button constantText `modify` modifier (const (event Click))
