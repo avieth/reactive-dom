@@ -395,6 +395,7 @@ data EventBinding (tag :: Symbol) where
            ( ElementEvent e tag )
         => Proxy e
         -> Event (EventData e)
+        -> EventM Element (DOMEvent e) ()
         -> (EventData e -> IO ())
         -> EventBinding tag
 
@@ -404,9 +405,10 @@ runEventBinding
     -> (DOMString, Bool)
     -> EventBinding tag
     -> IO ()
-runEventBinding el (eventName, fireWhenBubbled) (EventBinding (Proxy :: Proxy e) _ fire) = do
+runEventBinding el (eventName, fireWhenBubbled) (EventBinding (Proxy :: Proxy e) _ eventM fire) = do
     let action :: EventM Element (DOMEvent e) ()
-        action = do domEvent :: DOMEvent e <- EventM.event
+        action = do eventM
+                    domEvent :: DOMEvent e <- EventM.event
                     mbubbled <- liftIO $ getJSProperty domEvent "bubbled"
                     let bubbled = case mbubbled of
                             Just "true" -> True
@@ -435,15 +437,17 @@ elementEvent event roelement fireWhenBubbled = case existingBinding of
     -- unsafeCoerce is OK. We know ev must have the right type, because the
     -- only way it could have come to be here is if it was inserted for
     -- the same key, and the key is determined by the type @event@.
-    Just (EventBinding _ ev fire) -> pure (unsafeCoerce ev, roelement)
+    Just (EventBinding _ ev _ _) -> pure (unsafeCoerce ev, roelement)
     Nothing -> do
         (ev, fire) <- newEvent
-        let binding = EventBinding (Proxy :: Proxy event) ev fire
+        let binding = EventBinding (Proxy :: Proxy event) ev eventM fire
         let newEvents = M.alter (const (Just binding)) (key, fireWhenBubbled) (getEvents roelement)
         pure (ev, roelement { getEvents = newEvents })
   where
     existingBinding = M.lookup (key, fireWhenBubbled) (getEvents roelement)
     EventName key = eventName (Proxy :: Proxy event) (Proxy :: Proxy tag)
+    eventM :: EventM Element (DOMEvent event) ()
+    eventM = specialHandler (Proxy :: Proxy event) (Proxy :: Proxy tag)
 
 -- | Since we don't want to allow `execute` in ElementBuilder, we offer a
 --   specialized way of using effectful events. Only IOEvents with benign
@@ -521,6 +525,11 @@ class
     type DOMEvent event :: *
     eventName :: Proxy event -> Proxy tag -> EventName Element (DOMEvent event)
     eventData :: Proxy event -> Proxy tag -> Element -> DOMEvent event -> IO (EventData event)
+    -- In case you need to do special effects in the event handler.
+    -- Motivating case: the Submit event *always* prevents the default action.
+    -- Without this, the page will reload.
+    specialHandler :: Proxy event -> Proxy tag -> EventM Element (DOMEvent event) ()
+    specialHandler _ _ = pure ()
 
 data Click = Click
 instance W3CTag tag => ElementEvent Click tag where
@@ -549,6 +558,7 @@ instance ElementEvent Submit "form" where
     type DOMEvent Submit = DOM.Types.Event
     eventName _ _ = Element.submit
     eventData _ _ _ _ = pure ()
+    specialHandler _ _ = preventDefault
 
 data Input = Input
 instance ElementEvent Input "input" where
