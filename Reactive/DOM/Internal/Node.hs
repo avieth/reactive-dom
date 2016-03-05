@@ -47,7 +47,6 @@ import qualified Data.Map as M
 import Data.IORef
 import qualified Data.Text as T
 import Data.JSString.Text
-import Text.HTML.SanitizeXSS (sanitizeXSS)
 import GHCJS.Types
 import GHCJS.Marshal.Pure (PToJSVal, pToJSVal)
 import GHCJS.DOM.Types hiding (Event, Element, Document)
@@ -914,8 +913,7 @@ postprocess p = ElementBuilder $ lift (tell (Dual (Endo (schemaPostprocess p))))
 
 makeText :: Document -> T.Text -> MomentIO Text
 makeText document txt = do
-    let sanitized = sanitizeXSS txt
-    let txtJSString :: JSString = textToJSString sanitized
+    let txtJSString :: JSString = textToJSString txt
     Just txt <- document `createTextNode` txtJSString
     pure txt
 
