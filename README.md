@@ -46,7 +46,8 @@ type OpenWidget s t = forall tag . Widget tag s t
 
 -- A `UI t` is a `Widget tag s t` where the `tag` is a valid W3C tag, and
 -- the input is trivial.
-type UI t = forall tag . W3CTag tag => Widget tag () t
+data UI t where
+    UI :: W3CTag tag => Widget tag () t
 ```
 
 So what's in a `Widget tag s t`? It includes a derivation of a `t` from an
