@@ -22,6 +22,7 @@ Portability : non-portable (GHC only)
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 module Reactive.DOM.WebApp (
 
@@ -291,9 +292,9 @@ getPathParts = impureFlow $ \window -> do
 
 setHistory :: forall o . Flow o (Window, T.Text) ()
 setHistory = impureFlow $ \(window, urlpath) -> do
-    liftIO (putStrLn (show (mconcat [T.pack "Setting history to ", urlpath])))
+    liftIO (putStrLn (show (mconcat ["Setting history to ", urlpath])))
     Just history <- getHistory window
-    pushState history nullRef "" urlpath
+    pushState history nullRef ("" :: T.Text) urlpath
     pure ()
 
 -- | Go to the flow in a route under a particular name, prefixed by an
@@ -347,8 +348,11 @@ webApp window router notFound = widget $ \_ -> do
     let seqnc :: Sequence MomentIO (Flow () () Void)
         seqnc = first |> rest
     liftMomentIO (sequenceReactimate (const (putStrLn "webApp : flow changing") <$> seqnc))
+    -- Make every flow div inherit all style from the webApp div.
+    let inheritAll = always . Set $ makeStyle [("all", "inherit")]
+    let inheritAllModifier = modifier $ \x -> style inheritAll >> pure x
     let makeUI :: Flow () () Void -> UI (Sequence MomentIO ())
-        makeUI flow = ui (div (runFlow flow))
+        makeUI flow = ui (div (runFlow flow) `modify` inheritAllModifier)
         -- NB the following will not typecheck.
         --   makeUI = ui . div . runFlow
         -- Why?
