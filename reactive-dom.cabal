@@ -27,7 +27,8 @@ library
                      , Reactive.DOM.XHR
                      , Reactive.DOM.Geolocation
                      , Reactive.DOM.WebApp
-                     , Reactive.DOM.Widget.Primitive
+                     , Reactive.DOM.Widget.Common
+                     , Reactive.DOM.Widget.List
                      , Reactive.DOM.Widget.Picture
                      , Reactive.DOM.Widget.Paginator
 

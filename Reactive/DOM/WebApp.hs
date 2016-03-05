@@ -61,7 +61,7 @@ import Reactive.Sequence
 import Reactive.DOM.Node
 import Reactive.DOM.Flow
 import Reactive.DOM.Children.NodeList
-import Reactive.DOM.Widget.Primitive
+import Reactive.DOM.Widget.Common
 import GHCJS.Types
 import GHCJS.DOM.Window hiding (error, print, getWindow)
 import GHCJS.DOM.Location (getPathname)

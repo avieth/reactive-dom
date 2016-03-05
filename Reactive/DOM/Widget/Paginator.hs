@@ -21,8 +21,8 @@ import Control.Category
 import Reactive.Banana.Combinators
 import Reactive.Banana.Frameworks
 import Reactive.DOM.Node
-import Reactive.DOM.Widget.Primitive
-import Reactive.DOM.Widget.MonotoneList
+import Reactive.DOM.Widget.Common
+import Reactive.DOM.Widget.List
 import Reactive.DOM.Children.Algebraic hiding (Sum(..))
 import Reactive.DOM.Children.NodeList
 import Reactive.Sequence

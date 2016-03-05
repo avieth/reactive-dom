@@ -1,6 +1,6 @@
 {-|
-Module      : Reactive.DOM.Widget.Primitive
-Description : Various useful primitive widgets
+Module      : Reactive.DOM.Widget.Common
+Description : Various useful widgets
 Copyright   : (c) Alexander Vieth, 2016
 Licence     : BSD3
 Maintainer  : aovieth@gmail.com
@@ -12,7 +12,7 @@ Portability : non-portable (GHC only)
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE RankNTypes #-}
 
-module Reactive.DOM.Widget.Primitive where
+module Reactive.DOM.Widget.Common where
 
 import qualified Data.Text as T
 import Reactive.DOM.Node
