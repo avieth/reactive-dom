@@ -148,6 +148,16 @@ constantChildren = flip Children never
 children :: f SetChild -> Event [Change f SetChild] -> Children f
 children = Children
 
+childrenTrans
+    :: (forall f . g f -> h f)
+    -> (forall f . [Change g f] -> [Change h f])
+    -> Children g
+    -> Children h
+childrenTrans trans transc (Children a b) = Children a' b'
+  where
+    a' = trans a
+    b' = transc <$> b
+
 data ViewChildren f = ViewChildren {
       viewChildrenInitial :: f Child
     , viewChildrenChanges :: Event [Change f Child]
