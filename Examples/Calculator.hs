@@ -37,7 +37,7 @@ calculator = tie (rmap' makeOutput composite) (pure . tieKnot)
     -- A composite of 4 Widgets: number input, plus sign, number input,
     -- number output. Their inputs and outputs are clumsily bundled into
     -- tuples.
-    composite :: OpenWidget ((), ((), ((), (T.Text, Event T.Text))))
+    composite :: OpenWidget ((), ((), ((), (Event T.Text))))
                             (Event (Maybe Double), ((), (Event (Maybe Double), ())))
     composite =
         (openWidget numberInput)
@@ -46,7 +46,11 @@ calculator = tie (rmap' makeOutput composite) (pure . tieKnot)
         `widgetProduct`
         (((openWidget numberInput)
         `widgetProduct`
-        numberOutput)))
+        -- Must set the initial text input here. We can't feed it back
+        -- through from the output, since it is not used lazily. The event,
+        -- however, *is* used lazily, and indeed must be derived from the
+        -- output of the composite.
+        lmap (\ev -> ("", ev)) numberOutput)))
 
     -- From the output of the composite we can derive our desired final output:
     -- an event giving the sum.
@@ -67,8 +71,8 @@ calculator = tie (rmap' makeOutput composite) (pure . tieKnot)
     -- to make a UI. That's to say, we must describe how to produce the input
     -- of the Widget from its own output. But that's easy: we can derive
     -- the text from the sum event.
-    tieKnot :: Event (Maybe Double) -> ((), ((), ((), (T.Text, Event T.Text))))
-    tieKnot ev = ((), ((), ((), ("", maybe "Bad input" (T.pack . show) <$> ev))))
+    tieKnot :: Event (Maybe Double) -> ((), ((), ((), (Event T.Text))))
+    tieKnot ev = ((), ((), ((), (maybe "Bad input" (T.pack . show) <$> ev))))
 
     numberInput :: Widget "input" () (Event (Maybe Double))
     numberInput = (fmap . fmap) readDouble textInput
