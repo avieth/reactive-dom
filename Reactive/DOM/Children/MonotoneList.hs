@@ -21,19 +21,19 @@ import Data.Functor.Compose
 import Reactive.DOM.Internal.ChildrenContainer
 import Reactive.DOM.Internal.Mutation
 
-newtype MonotoneList t f = MonotoneList {
+newtype MonotoneList t inp out f = MonotoneList {
       runMonotoneList :: [f t]
     }
 
-deriving instance Semigroup (MonotoneList t f)
-deriving instance Monoid (MonotoneList t f)
+deriving instance Semigroup (MonotoneList t inp out f)
+deriving instance Monoid (MonotoneList t inp out f)
 
-instance FunctorTransformer (MonotoneList t) where
+instance FunctorTransformer (MonotoneList inp out t) where
     functorTrans trans (MonotoneList fts) = MonotoneList (trans <$> fts)
     functorCommute (MonotoneList fts) = MonotoneList <$> sequenceA (getCompose <$> fts)
 
-instance ChildrenContainer (MonotoneList t) where
-    type Change (MonotoneList t) = MonotoneList t
+instance ChildrenContainer (MonotoneList inp out t) where
+    type Change (MonotoneList t inp out) = MonotoneList t inp out
     getChange get (MonotoneList news) (MonotoneList olds) =
         let nextList = MonotoneList (olds <> news)
             mutations = AppendChild . get <$> news

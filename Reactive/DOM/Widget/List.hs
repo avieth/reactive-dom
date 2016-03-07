@@ -34,7 +34,7 @@ nodeListWidget
 nodeListWidget = widget $ \(~((initial, rest), viewChildren)) -> do
 
     -- Values are derived from the viewChildren.
-    let concatOne :: NodeList t Child -> t
+    let concatOne :: forall inp out . NodeList t inp out Child -> t
         concatOne = mconcat . fmap childData . runNodeList
     let firstT :: t
         firstT = concatOne $ viewChildrenInitial viewChildren
@@ -64,12 +64,12 @@ monotoneListWidget
     :: forall t .
        ( Monoid t )
     => OpenWidget ([UI t], Event [UI t]) (t, Event t)
-monotoneListWidget = widget $ \(~((initial, changes), viewChildren :: ViewChildren (MonotoneList t))) -> mdo
+monotoneListWidget = widget $ \(~((initial, changes), viewChildren)) -> mdo
 
     -- Use the ViewChildren to come up with the output sequence.
-    let concatOne :: MonotoneList t Child -> t
+    let concatOne :: forall inp out . MonotoneList t inp out Child -> t
         concatOne = mconcat . fmap childData . runMonotoneList
-    let concatMany :: [MonotoneList t Child] -> t
+    let concatMany :: forall inp out . [MonotoneList t inp out Child] -> t
         concatMany = mconcat . fmap concatOne
     let firstT :: t
         firstT = concatOne $ viewChildrenInitial viewChildren

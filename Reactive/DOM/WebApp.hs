@@ -363,7 +363,7 @@ webApp window router notFound = widget $ \_ -> do
         --   f (g x)
         -- is well typed then so too is
         --   f . g
-    let childrenSequence :: Sequence MomentIO (NodeList (Sequence MomentIO ()) SetChild)
+    let childrenSequence :: forall inp out . Sequence MomentIO (NodeList (Sequence MomentIO ()) inp out SetChild)
         childrenSequence = nodeList . pure . newChild . makeUI <$> seqnc
     (firstChild, restChild) <- liftMomentIO (runSequence childrenSequence)
     pure ((), children firstChild (pure <$> restChild))

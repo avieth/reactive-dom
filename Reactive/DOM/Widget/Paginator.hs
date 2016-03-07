@@ -77,13 +77,13 @@ paginator = lmap makeInput (rmap' makeOutput product)
 
     loadingButton :: OpenWidget (PaginatorState, Event PaginatorState) (Event ())
     loadingButton = widget $ \((initialState, evState), viewChildren) -> do
-        let getClickEvent :: NodeList (Event ()) Child -> Event ()
+        let getClickEvent :: forall inp out . NodeList (Event ()) inp out Child -> Event ()
             getClickEvent (NodeList []) = never
             getClickEvent (NodeList (x : _)) = childData x
         let childrenSequence = viewChildrenInitial viewChildren |> viewChildrenEvent viewChildren
         let clickEventSequence = getClickEvent <$> childrenSequence
         click <- sequenceSwitchE clickEventSequence
-        let makeChildren :: PaginatorState -> NodeList (Event ()) SetChild
+        let makeChildren :: forall inp out . PaginatorState -> NodeList (Event ()) inp out SetChild
             makeChildren x = case x of
                 Incomplete -> nodeList [newChild button]
                 Fetching -> nodeList [newChild loading]

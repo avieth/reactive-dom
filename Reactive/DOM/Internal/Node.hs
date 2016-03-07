@@ -179,30 +179,69 @@ viewChildrenTrans trans transc (ViewChildren a b c) = ViewChildren a' b' c'
     b' = transc <$> b
     c' = trans <$> c
 
+-- | Description of a user interface piece.
+--   Inside is a kernel, in which some output type q and children must be
+--   derived from some input type r and the data from those children.
+--   The form of the children may also depend upon the types q and r.
+--   Once this kernel is given, a Widget remains somewhat flexible due to the
+--   other two pieces: monadic input and output arrows formed in such a way
+--   that the input may depend upon the output and vice-versa.
 data Widget (tag :: Symbol) s t where
     Widget
-        :: ( ChildrenContainer f )
-        => (  (s, ViewChildren f)
-           -> ElementBuilder tag (t, Children f)
+        :: ( ChildrenContainer (f r q) )
+        => (passback -> s -> ElementBuilder tag (passforward, r))
+        -- input may depend upon output
+        -> (  (r, ViewChildren (f r q))
+           -> ElementBuilder tag (q, Children (f r q))
            )
+        -> (passforward -> q -> ElementBuilder tag (passback, t))
+        -- output may depend upon input
         -> Widget tag s t
 
+type IntrinsicPart tag f r q =
+       (r, ViewChildren (f r q))
+    -> ElementBuilder tag (q, Children (f r q))
+
 instance Functor (Widget tag s) where
-    fmap f (Widget mk) = Widget $ \(s, c) -> do
-        (t, c') <- mk (s, c)
-        pure (f t, c')
+    fmap = rmap
 
 instance Profunctor (Widget tag) where
-    dimap l r (Widget mk) = Widget $ \(s, c) -> do
-        (t, c') <- mk (l s, c)
-        pure (r t, c')
+    dimap l r (Widget l' mk r') = Widget l'' mk r''
+      where
+        l'' passback s = l' passback (l s)
+        r'' passforward q = (fmap . fmap) r (r' passforward q)
 
--- | Like first for arrows, but since Widget is not an arrow (can't give arr)
---   we make our own.
+-- | Like first for arrows, but since Widget is not an arrow (can't give arr,
+--   and it's also not a category) we make our own.
 passthrough :: Widget tag s t -> Widget tag (s, c) (t, c)
-passthrough (Widget mk) = Widget $ \(~((s, c), viewChildren)) -> do
-    (t, setChildren) <- mk (s, viewChildren)
-    pure ((t, c), setChildren)
+passthrough (Widget l mk r) = Widget l' mk r'
+  where
+    l' passback (~(s, c)) = fmap (\(~(pf, r)) -> ((pf, c), r)) (l passback s)
+    r' (~(passforward, c)) q = fmap (\(~(pb, t)) -> (pb, (t, c))) (r passforward q)
+
+-- | Use the output of a Widget as its input.
+knot
+    :: Widget tag t t
+    -> Widget tag () t
+knot (Widget l mk r) = Widget l' mk r'
+  where
+    l' (~(pb, pb')) ~() = l pb' pb
+    -- Pass output back and use it as input.
+    r' pf q = fmap (\(~(pb, t)) -> ((t, pb), t)) (r pf q)
+
+-- | Like knot, but the input is derived from the output, with the output
+--   remaining unchanged.
+tie
+    :: forall tag s t .
+       Widget tag s t
+    -> (t -> ElementBuilder tag s)
+    -> Widget tag () t
+tie w f =
+    let tupled :: Widget tag (t, s) (t, s)
+        tupled = dimap' (\(~(t, s)) -> pure s) (\t -> fmap ((,) t) (f t)) w
+        knotted :: Widget tag () (t, s)
+        knotted = knot tupled
+    in  rmap fst knotted
 
 -- | Like dimap, but we allow you to MomentIO.
 dimap'
@@ -210,11 +249,13 @@ dimap'
     -> (t -> ElementBuilder tag u)
     -> Widget tag s t
     -> Widget tag q u
-dimap' l r (Widget mk) = Widget $ \(q, c) -> do
-    s <- l q
-    (t, c') <- mk (s, c)
-    u <- r t
-    pure (u, c')
+dimap' l r (Widget l' mk r') = Widget l'' mk r''
+  where
+    l'' pb s = do s' <- l s
+                  l' pb s'
+    r'' pf q = do ~(pb, t) <- r' pf q
+                  t' <- r t
+                  pure (pb, t')
 
 lmap' :: (q -> ElementBuilder tag s) -> Widget tag s t -> Widget tag q t
 lmap' l = dimap' l pure
@@ -223,12 +264,15 @@ rmap' :: (t -> ElementBuilder tag u) -> Widget tag s t -> Widget tag s u
 rmap' r = dimap' pure r
 
 widget
-    :: ( ChildrenContainer f )
-    => (  (s, ViewChildren f)
-       -> ElementBuilder tag (t, Children f)
+    :: ( ChildrenContainer (f s t) )
+    => (  (s, ViewChildren (f s t))
+       -> ElementBuilder tag (t, Children (f s t))
        )
     -> Widget tag s t
-widget = Widget
+widget mk = Widget l mk r
+  where
+    l pb s = pure ((), s)
+    r pf t = pure ((), t)
 
 type OpenWidget s t = forall tag . Widget tag s t
 
@@ -246,22 +290,6 @@ instance Functor UI where
 
 ui :: forall tag t . W3CTag tag => Widget tag () t -> UI t
 ui = UI (Tag :: Tag tag)
-
-knot
-    :: Widget tag t t
-    -> Widget tag () t
-knot (Widget mk) = Widget $ \(_, viewChildren) -> mdo
-    (t, setChildren) <- mk (t, viewChildren)
-    pure (t, setChildren)
-
-tie
-    :: Widget tag s t
-    -> (t -> ElementBuilder tag s)
-    -> Widget tag () t
-tie (Widget mk) f = Widget $ \(_, viewChildren) -> mdo
-    (t, setChildren) <- mk (s, viewChildren)
-    s <- f t
-    pure (t, setChildren)
 
 -- | A modifier uses the output, model, and children of some Widget to
 --   alter the output. It cannot change the model nor the children, just the
@@ -292,15 +320,15 @@ modify
        Widget tag s t
     -> Modifier tag t u
     -> Widget tag s u
-modify (Widget mk) modifier = Widget mk'
+modify (Widget l mk r) modifier = Widget l mk r'
   where
-    mk' (s, viewChildren) = do
-        (t, setChildren) <- mk (s, viewChildren)
+    r' pf q = do
+        ~(pb, t) <- r pf q
         u <- runModifier modifier t
-        pure (u, setChildren)
+        pure (pb, u)
 
 makeChildrenInput
-    :: forall f r .
+    :: forall f .
        ( ChildrenContainer f
        )
     => Document
@@ -312,7 +340,6 @@ makeChildrenInput document childrenOutput = mdo
 
     firstChildren :: f Child
         <- functorCommute . functorTrans (flip runSetChild document) $ childrenInitial childrenOutput
-
 
     -- childrenChanges childrenOutput :: Event [Change f SetChild]
     -- flip runSetChild document :: SetChild t -> Compose MomentIO SetChild t
@@ -356,14 +383,27 @@ buildWidget
     -> s
     -> Document
     -> MomentIO (t, Element)
-buildWidget (Widget mk) s document = mdo
+buildWidget (Widget l mk r) s document = mdo
     Just el <- document `createElement` Just (w3cTagName (Tag :: Tag tag))
-    let ebuilder = mk (s, childrenInput)
     let roelem = ReadOnlyElement el M.empty
-    ((t, childrenOutput), roelem', eschemaDualEndo)
+    -- Make a composite ElementBuilder from 3 principal parts of the widget:
+    --   the input l
+    --   the intrinsic part mk
+    --   the output r
+    --
+    -- Notice that the inputter l must be lazy in passback, the intrinsic part
+    -- must be lazy in childrenInput, but the outputter need not be lazy in
+    -- either argument.
+    let ebuilder = mdo ~(passforward, s') <- l passback s
+                       ~(t', childrenOutput) <- mk (s', childrenInput)
+                       ~(passback, t) <- r passforward t'
+                       ~(childrenInput, mutationSequence)
+                           <- liftMomentIO $ makeChildrenInput document childrenOutput
+                       pure (t, mutationSequence)
+    ((t, mutationSequence), roelem', eschemaDualEndo)
         <- buildElement ebuilder roelem
-    (childrenInput, mutationSequence) <- makeChildrenInput document childrenOutput
-    let eschema = appEndo (getDual eschemaDualEndo) $ emptySchema
+    let eschema = appEndo (getDual eschemaDualEndo)
+                $ emptySchema
     _ <- reactimateChildren el mutationSequence
     _ <- runElementSchema eschema document el
     liftIO (wireEvents roelem')
