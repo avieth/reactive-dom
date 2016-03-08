@@ -26,9 +26,11 @@ module Reactive.DOM.Children.Algebraic where
 import Reactive.DOM.Internal.Mutation
 import Reactive.DOM.Internal.ChildrenContainer
 import Reactive.DOM.Internal.Node
+import Reactive.DOM.Node (emptyWidget, openWidget)
 import Reactive.Banana.Combinators
 import Reactive.Banana.Frameworks
 import Data.Monoid ((<>))
+import Data.Profunctor
 
 -- | A composite children container representing the conjunction of two
 --   other containers, or in other words the union of the children in both
@@ -139,6 +141,42 @@ widgetProduct (Widget l1 mk1 r1) (Widget l2 mk2 r2) = Widget l mk r
         let rightChanges = (fmap . fmap) (Sum . Right) (childrenChanges c2)
         let rest = unionWith (<>) leftChanges rightChanges
         pure ((t1, t2), children initial rest)
+
+-- We need this in order to do widgetProductUniform.
+-- Working with OpenWidget s t ~ forall tag . Widget tag s t in the fold just
+-- doesn't seem to work. I'm not at all sure why...
+data FoldOpenWidget s t where
+    FoldOpenWidget :: OpenWidget s t -> FoldOpenWidget s t
+
+widgetProductUniform
+    :: forall s t f .
+       ( Foldable f, Monoid t )
+    => f (ClosedWidget s t)
+    -> OpenWidget s t
+widgetProductUniform xs =
+    let FoldOpenWidget w = foldl combine' base xs
+    in  w
+
+  where
+
+    combine' :: FoldOpenWidget s t -> ClosedWidget s t -> FoldOpenWidget s t
+    combine' left right =
+        let rest :: OpenWidget s t
+            FoldOpenWidget rest = left
+            this :: OpenWidget s t
+            this = openWidget right
+            combined :: OpenWidget (s, s) (t, t)
+            combined = rest `widgetProduct` this
+        in  FoldOpenWidget (dimap diag (uncurry (<>)) combined)
+
+    combine :: OpenWidget s t -> ClosedWidget s t -> OpenWidget s t
+    combine left right = dimap diag (uncurry (<>)) (left `widgetProduct` openWidget right)
+
+    diag :: forall t . t -> (t, t)
+    diag t = (t, t)
+
+    base :: FoldOpenWidget s t
+    base = FoldOpenWidget (rmap (const mempty) emptyWidget)
 
 -- | Like Either but the choice is present in the type as well.
 data TEither (d :: * -> Either * *) (l :: *) (r :: *) where

@@ -21,17 +21,20 @@ module Reactive.DOM.Node (
     , W3CTag
     , Widget
     , OpenWidget
+    , ClosedWidget(..)
+    , UI
+    , ui
     , widget
+    , emptyWidget
     , openWidget
     , closeWidget
     , passthrough
     , knot
     , tie
+    , tieKnot
     , dimap'
     , lmap'
     , rmap'
-    , UI
-    , ui
     , Children
     , constantChildren
     , children
@@ -96,13 +99,17 @@ import Reactive.DOM.Internal.Mutation
 import Reactive.DOM.Internal.ChildrenContainer
 import Reactive.DOM.Children.Static
 import Reactive.DOM.Children.Single
+import Reactive.DOM.Children.NodeList
 import Data.Profunctor
 
--- | Make any Widget into an OpenWidget. The OpenWidget has that Widget as its
---   only child, always.
-openWidget :: forall tag s t . W3CTag tag => Widget tag s t -> OpenWidget s t
-openWidget w = widget $ \(~(s, viewChildren)) -> do
+-- | Make any ClosedWidget into an OpenWidget. The OpenWidget has that
+--   ClosedWidget as its only child, always.
+openWidget :: forall s t . ClosedWidget s t -> OpenWidget s t
+openWidget (ClosedWidget _ w) = widget $ \(~(s, viewChildren)) -> do
     let child :: UI t
         child = ui (lmap (const s) w)
     let Static (Single t) = viewChildrenInitial viewChildren
     pure (childData t, constantChildren (Static (Single (newChild child))))
+
+emptyWidget :: OpenWidget s ()
+emptyWidget = widget $ \_ -> pure ((), constantChildren (Static (nodeList [])))

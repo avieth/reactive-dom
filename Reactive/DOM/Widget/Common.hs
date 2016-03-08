@@ -23,9 +23,6 @@ import Reactive.Banana.Combinators
 import Reactive.Sequence
 import Data.Profunctor
 
-emptyWidget :: OpenWidget () ()
-emptyWidget = widget $ \_ -> pure ((), constantChildren (Static (nodeList [])))
-
 varyingText :: OpenWidget (T.Text, Event T.Text) ()
 varyingText = widget $ \(~((txt, evTxt), _)) ->
     pure ((), children (Single (textChild txt)) (pure . Single . textChild <$> evTxt))

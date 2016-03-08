@@ -243,6 +243,20 @@ tie w f =
         knotted = knot tupled
     in  rmap fst knotted
 
+tieKnot
+    :: forall tag s t r .
+       Widget tag s t
+    -> (t -> r -> ElementBuilder tag s)
+    -> Widget tag r t
+tieKnot (Widget l mk r) f = Widget l' mk r'
+  where
+    l' ~(pb, t) r = do
+        s <- f t r
+        l pb s
+    r' pf q = do
+        ~(pb, t) <- r pf q
+        pure ((pb, t), t)
+
 -- | Like dimap, but we allow you to MomentIO.
 dimap'
     :: (q -> ElementBuilder tag s)
@@ -282,14 +296,19 @@ closeWidget _ w = w
 tag :: Tag tag -> OpenWidget s t -> Widget tag s t
 tag = closeWidget
 
-data UI t where
-    UI :: W3CTag tag => Tag tag -> Widget tag () t -> UI t
+data ClosedWidget s t where
+    ClosedWidget :: W3CTag tag => Tag tag -> Widget tag s t -> ClosedWidget s t
 
-instance Functor UI where
-    fmap f (UI proxy w) = UI proxy (fmap f w)
+instance Functor (ClosedWidget s) where
+    fmap = rmap
+
+instance Profunctor ClosedWidget where
+    dimap l r (ClosedWidget tag w) = ClosedWidget tag (dimap l r w)
+
+type UI t = ClosedWidget () t
 
 ui :: forall tag t . W3CTag tag => Widget tag () t -> UI t
-ui = UI (Tag :: Tag tag)
+ui = ClosedWidget (Tag :: Tag tag)
 
 -- | A modifier uses the output, model, and children of some Widget to
 --   alter the output. It cannot change the model nor the children, just the
@@ -410,7 +429,7 @@ buildWidget (Widget l mk r) s document = mdo
     pure (t, el)
 
 buildUI :: UI t -> Document -> MomentIO (t, Element)
-buildUI (UI _ widget) = buildWidget widget ()
+buildUI (ClosedWidget _ widget) = buildWidget widget ()
 
 reactimateChildren
     :: Element
