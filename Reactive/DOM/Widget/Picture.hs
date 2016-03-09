@@ -47,10 +47,9 @@ dataUri duri = T.concat [
     ]
 
 -- | A static picture.
-picture :: Widget "img" PictureSource ()
-picture = base `modify` modifier setAttributes
+picture :: ClosedWidget PictureSource ()
+picture = closeWidget Tag (lmap' setup (trivialWidget :: Widget "img" () ()))
   where
-    base = closeWidget (Tag :: Tag "img") $ widget $ \(~(psource, _)) -> do
-        pure (psource, constantChildren (Static (nodeList [])))
+    setup psource = attributes (always (mkAttributes psource))
     mkAttributes (PictureSourceDataUri duri) = Set (makeAttributes [("src", dataUri duri)])
     setAttributes psource = attributes (always (mkAttributes psource))

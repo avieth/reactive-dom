@@ -219,30 +219,9 @@ passthrough (Widget l mk r) = Widget l' mk r'
     l' passback (~(s, c)) = fmap (\(~(pf, r)) -> ((pf, c), r)) (l passback s)
     r' (~(passforward, c)) q = fmap (\(~(pb, t)) -> (pb, (t, c))) (r passforward q)
 
--- | Use the output of a Widget as its input.
-knot
-    :: Widget tag t t
-    -> Widget tag () t
-knot (Widget l mk r) = Widget l' mk r'
-  where
-    l' (~(pb, pb')) ~() = l pb' pb
-    -- Pass output back and use it as input.
-    r' pf q = fmap (\(~(pb, t)) -> ((t, pb), t)) (r pf q)
-
--- | Like knot, but the input is derived from the output, with the output
---   remaining unchanged.
-tie
-    :: forall tag s t .
-       Widget tag s t
-    -> (t -> ElementBuilder tag s)
-    -> Widget tag () t
-tie w f =
-    let tupled :: Widget tag (t, s) (t, s)
-        tupled = dimap' (\(~(t, s)) -> pure s) (\t -> fmap ((,) t) (f t)) w
-        knotted :: Widget tag () (t, s)
-        knotted = knot tupled
-    in  rmap fst knotted
-
+-- | Tie a recursive knot: use the output and some new input type to come up
+--   with the original input type. Be sure that the function uses its first
+--   argument lazily.
 tieKnot
     :: forall tag s t r .
        Widget tag s t
@@ -290,12 +269,10 @@ widget mk = Widget l mk r
 
 type OpenWidget s t = forall tag . Widget tag s t
 
-closeWidget :: Tag tag -> OpenWidget s t -> Widget tag s t
-closeWidget _ w = w
-
-tag :: Tag tag -> OpenWidget s t -> Widget tag s t
-tag = closeWidget
-
+-- | Some Widget whose tag is known to be a valid W3CTag, and can therefore be
+--   rendered to the DOM.
+--   Once closed, only its input and ouput can be altered via its profunctor
+--   instance. Events, style, attributes etc. are all untouchable.
 data ClosedWidget s t where
     ClosedWidget :: W3CTag tag => Tag tag -> Widget tag s t -> ClosedWidget s t
 
@@ -305,10 +282,13 @@ instance Functor (ClosedWidget s) where
 instance Profunctor ClosedWidget where
     dimap l r (ClosedWidget tag w) = ClosedWidget tag (dimap l r w)
 
+closeWidget :: W3CTag tag => Tag tag -> Widget tag s t -> ClosedWidget s t
+closeWidget = ClosedWidget
+
 type UI t = ClosedWidget () t
 
 ui :: forall tag t . W3CTag tag => Widget tag () t -> UI t
-ui = ClosedWidget (Tag :: Tag tag)
+ui = closeWidget Tag
 
 -- | A modifier uses the output, model, and children of some Widget to
 --   alter the output. It cannot change the model nor the children, just the

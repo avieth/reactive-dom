@@ -31,25 +31,25 @@ constantText :: OpenWidget T.Text ()
 constantText = lmap (\t -> (t, never)) varyingText
 
 div :: OpenWidget s t -> Widget "div" s t
-div = closeWidget (Tag :: Tag "div")
+div = id
 
 p :: OpenWidget s t -> Widget "p" s t
-p = closeWidget (Tag :: Tag "p")
+p = id
 
 span :: OpenWidget s t -> Widget "span" s t
-span = closeWidget (Tag :: Tag "span")
+span = id
 
 button :: OpenWidget s t -> Widget "button" s t
-button = closeWidget (Tag :: Tag "button")
+button = id
 
 input :: OpenWidget s t -> Widget "input" s t
-input = closeWidget (Tag :: Tag "input")
+input = id
 
 form :: OpenWidget s t -> Widget "form" s t
-form = closeWidget (Tag :: Tag "form")
+form = id
 
 hr :: Widget "hr" () ()
-hr = closeWidget (Tag :: Tag "hr") emptyWidget
+hr = trivialWidget
 
 -- | A button which shows text and gives a click event.
 simpleButton :: Widget "button" T.Text (Event ())
@@ -58,7 +58,7 @@ simpleButton = button constantText `modify` modifier (const (event Click))
 -- | The text displayed here is not determined by children, but by the value
 --   property, so it can be played with through the Modification interface.
 textInput :: Widget "input" () (Event T.Text)
-textInput = input emptyWidget `modify` modifier (const (event Input))
+textInput = input trivialWidget `modify` modifier (const (event Input))
 
 -- | Same as textInput but we set the type attribute to password for you.
 passwordInput :: Widget "input" () (Event T.Text)

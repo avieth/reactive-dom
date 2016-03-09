@@ -21,16 +21,16 @@ module Reactive.DOM.Node (
     , W3CTag
     , Widget
     , OpenWidget
+    -- TBD export constructor?
     , ClosedWidget(..)
     , UI
     , ui
     , widget
+    , trivialWidget
     , emptyWidget
     , openWidget
     , closeWidget
     , passthrough
-    , knot
-    , tie
     , tieKnot
     , dimap'
     , lmap'
@@ -101,6 +101,7 @@ import Reactive.DOM.Children.Static
 import Reactive.DOM.Children.Single
 import Reactive.DOM.Children.NodeList
 import Data.Profunctor
+import Data.Void
 
 -- | Make any ClosedWidget into an OpenWidget. The OpenWidget has that
 --   ClosedWidget as its only child, always.
@@ -111,5 +112,11 @@ openWidget (ClosedWidget _ w) = widget $ \(~(s, viewChildren)) -> do
     let Static (Single t) = viewChildrenInitial viewChildren
     pure (childData t, constantChildren (Static (Single (newChild child))))
 
-emptyWidget :: OpenWidget s ()
-emptyWidget = widget $ \_ -> pure ((), constantChildren (Static (nodeList [])))
+trivialWidget :: OpenWidget () ()
+trivialWidget = widget $ \_ -> pure ((), constantChildren (Static (nodeList [])))
+
+emptyWidget :: OpenWidget Void Void
+emptyWidget = widget mk
+  where
+    mk :: forall tag . (Void, ViewChildren (NodeList Void Void Void)) -> ElementBuilder tag (Void, Children (NodeList Void Void Void))
+    mk = absurd . fst

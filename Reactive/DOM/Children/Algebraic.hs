@@ -26,7 +26,7 @@ module Reactive.DOM.Children.Algebraic where
 import Reactive.DOM.Internal.Mutation
 import Reactive.DOM.Internal.ChildrenContainer
 import Reactive.DOM.Internal.Node
-import Reactive.DOM.Node (emptyWidget, openWidget)
+import Reactive.DOM.Node (emptyWidget, trivialWidget, openWidget)
 import Reactive.Banana.Combinators
 import Reactive.Banana.Frameworks
 import Data.Monoid ((<>))
@@ -176,7 +176,7 @@ widgetProductUniform xs =
     diag t = (t, t)
 
     base :: FoldOpenWidget s t
-    base = FoldOpenWidget (rmap (const mempty) emptyWidget)
+    base = FoldOpenWidget (dimap (const ()) (const mempty) trivialWidget)
 
 -- | Like Either but the choice is present in the type as well.
 data TEither (d :: * -> Either * *) (l :: *) (r :: *) where

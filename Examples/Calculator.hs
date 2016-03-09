@@ -30,7 +30,7 @@ import Data.Profunctor
 --   their output via rmap', then loop that output back to its input via
 --   tie (we tie the knot).
 calculator :: OpenWidget () (Event (Maybe Double))
-calculator = tie (rmap' makeOutput composite) (pure . tieKnot)
+calculator = tieKnot (rmap' makeOutput composite) loop
 
   where
 
@@ -40,11 +40,11 @@ calculator = tie (rmap' makeOutput composite) (pure . tieKnot)
     composite :: OpenWidget ((), ((), ((), (Event T.Text))))
                             (Event (Maybe Double), ((), (Event (Maybe Double), ())))
     composite =
-        (openWidget numberInput)
+        (openWidget (closeWidget Tag numberInput))
         `widgetProduct`
-        ((openWidget plusSign)
+        ((openWidget (closeWidget Tag plusSign))
         `widgetProduct`
-        (((openWidget numberInput)
+        (((openWidget (closeWidget Tag numberInput))
         `widgetProduct`
         -- Must set the initial text input here. We can't feed it back
         -- through from the output, since it is not used lazily. The event,
@@ -71,8 +71,8 @@ calculator = tie (rmap' makeOutput composite) (pure . tieKnot)
     -- to make a UI. That's to say, we must describe how to produce the input
     -- of the Widget from its own output. But that's easy: we can derive
     -- the text from the sum event.
-    tieKnot :: Event (Maybe Double) -> ((), ((), ((), (Event T.Text))))
-    tieKnot ev = ((), ((), ((), (maybe "Bad input" (T.pack . show) <$> ev))))
+    loop :: Applicative m => Event (Maybe Double) -> () -> m ((), ((), ((), (Event T.Text))))
+    loop ev _ = pure ((), ((), ((), (maybe "Bad input" (T.pack . show) <$> ev))))
 
     numberInput :: Widget "input" () (Event (Maybe Double))
     numberInput = (fmap . fmap) readDouble textInput
