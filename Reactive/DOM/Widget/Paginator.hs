@@ -59,15 +59,10 @@ prependIncrement t = (Sum 1, t)
 paginator
     :: forall t .
        ( Monoid t )
-    => OpenWidget (PaginatorInput t, Event (PaginatorInput t))
-                  ((t, Event t), Event PaginatorOutput)
+    => OpenWidget (Sequence (PaginatorInput t))
+                  (Sequence t, Event PaginatorOutput)
 paginator = lmap makeInput (rmap' makeOutput product)
   where
-
-    paginatorState
-        :: (PaginatorInput t, Event (PaginatorInput t))
-        -> (PaginatorState, Event PaginatorState)
-    paginatorState (x, y) = (makePaginatorState x, fmap makePaginatorState y)
 
     makePaginatorState :: PaginatorInput t -> PaginatorState
     makePaginatorState x = case x of
@@ -75,8 +70,8 @@ paginator = lmap makeInput (rmap' makeOutput product)
         Exhausted _ -> Complete
         Expect -> Fetching
 
-    loadingButton :: OpenWidget (PaginatorState, Event PaginatorState) (Event ())
-    loadingButton = widget $ \((initialState, evState), viewChildren) -> do
+    loadingButton :: OpenWidget (Sequence PaginatorState) (Event ())
+    loadingButton = widget $ \(seqnc, viewChildren) -> do
         let getClickEvent :: forall inp out . NodeList (Event ()) inp out Child -> Event ()
             getClickEvent (NodeList []) = never
             getClickEvent (NodeList (x : _)) = childData x
@@ -88,6 +83,7 @@ paginator = lmap makeInput (rmap' makeOutput product)
                 Incomplete -> nodeList [newChild button]
                 Fetching -> nodeList [newChild loading]
                 Complete -> nodeList []
+        (initialState, evState) <- liftMoment $ runSequence seqnc
         let firstChildren = makeChildren initialState
         let evChildren = pure . makeChildren <$> evState
         pure (click, children firstChildren evChildren)
@@ -96,8 +92,9 @@ paginator = lmap makeInput (rmap' makeOutput product)
     -- widget which is either a button to fetch more, a loading indicator, or
     -- nothing (in case the paginator is exhausted).
     -- That second component is a function of a PaginatorState.
-    product :: OpenWidget (([UI (Sum Int, t)], Event [UI (Sum Int, t)]), (PaginatorState, Event PaginatorState))
-                          (((Sum Int, t), Event (Sum Int, t)), Event ())
+    product
+        :: OpenWidget (Sequence [UI (Sum Int, t)], Sequence PaginatorState)
+                      (Sequence (Sum Int, t), Event ())
     product = monotoneListWidget `widgetProduct` loadingButton
 
     -- How to come up with the current offset?
@@ -106,26 +103,20 @@ paginator = lmap makeInput (rmap' makeOutput product)
     -- the first and use it against the button's click event.
 
     makeInput
-        :: (PaginatorInput t, Event (PaginatorInput t))
-        -> (([UI (Sum Int, t)], Event [UI (Sum Int, t)]), (PaginatorState, Event PaginatorState))
-    -- Lazy match is very important here.
-    makeInput (~(initialInput, evInput)) =
-        let state = paginatorState (initialInput, evInput)
-            initialUIs = (fmap . fmap) prependIncrement . paginatorInputUIs $ initialInput
-            evUIs = (fmap . fmap) prependIncrement . paginatorInputUIs <$> evInput
-        in  ((initialUIs, evUIs), state)
+        :: (Sequence (PaginatorInput t))
+        -> (Sequence [UI (Sum Int, t)], Sequence PaginatorState) 
+    makeInput seqnc = 
+        let uis = (fmap . fmap) prependIncrement . paginatorInputUIs <$> seqnc
+            state = makePaginatorState <$> seqnc
+        in  (uis, state)
 
     makeOutput
-        :: (((Sum Int, t), Event (Sum Int, t)), Event ())
-        -> ElementBuilder tag ((t, Event t), Event PaginatorOutput)
-    makeOutput (~((x1, y1), click)) = do
-        let initialT = snd x1
-        let evT = snd <$> y1
-        let initialSum = fst x1
-        let evSum = fst <$> y1
-        total <- stepper initialSum evSum
+        :: (Sequence (Sum Int, t), Event ())
+        -> ElementBuilder tag (Sequence t, Event PaginatorOutput)
+    makeOutput (seqnc, click) = do
+        total <- behavior (fst <$> seqnc)
         let output = (Fetch . getSum <$> total) <@ click
-        pure ((initialT, evT), output)
+        pure (snd <$> seqnc, output)
 
     button :: UI (Event ())
     button = let open = lmap (const "Get more") (span constantText)

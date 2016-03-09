@@ -23,15 +23,13 @@ import Reactive.DOM.Children.MonotoneList
 
 -- | Show a list of UIs in the list order, and give back the monoidal
 --   concatenation of their values.
---
---   Input/output is a tuple rather than a sequence because if it were a
---   sequence then we'd have to force it. If runSequence were lazy then we'd be
---   ok. Could we somehow make it lazy?
 nodeListWidget
     :: forall m t .
        ( Monoid t )
-    => OpenWidget ([UI t], Event [UI t]) (t, Event t)
-nodeListWidget = widget $ \(~((initial, rest), viewChildren)) -> do
+    => OpenWidget (Sequence [UI t]) (Sequence t)
+nodeListWidget = widget $ \(~(seqnc, viewChildren)) -> do
+
+    (initial, rest) <- liftMoment $ runSequence seqnc
 
     -- Values are derived from the viewChildren.
     let concatOne :: forall inp out . NodeList t inp out Child -> t
@@ -40,7 +38,7 @@ nodeListWidget = widget $ \(~((initial, rest), viewChildren)) -> do
         firstT = concatOne $ viewChildrenInitial viewChildren
     let restT :: Event t
         restT = concatOne <$> viewChildrenEvent viewChildren
-    let seqncT = (firstT, restT)
+    let seqncT = firstT |> restT
 
     -- Children are derived easily from the input.
     let firstChildren = nodeList . fmap newChild $ initial
@@ -63,8 +61,10 @@ nodeListWidget = widget $ \(~((initial, rest), viewChildren)) -> do
 monotoneListWidget
     :: forall t .
        ( Monoid t )
-    => OpenWidget ([UI t], Event [UI t]) (t, Event t)
-monotoneListWidget = widget $ \(~((initial, changes), viewChildren)) -> mdo
+    => OpenWidget (Sequence [UI t]) (Sequence t)
+monotoneListWidget = widget $ \(~(seqnc, viewChildren)) -> mdo
+
+    (initial, changes) <- liftMoment $ runSequence seqnc
 
     -- Use the ViewChildren to come up with the output sequence.
     let concatOne :: forall inp out . MonotoneList t inp out Child -> t
@@ -83,4 +83,4 @@ monotoneListWidget = widget $ \(~((initial, changes), viewChildren)) -> mdo
     let childrenInitial = MonotoneList . fmap newChild $ initial
     let childrenChanges = MonotoneList . fmap newChild <$> changes
 
-    pure ((firstT, accumulatedT), children childrenInitial (pure <$> childrenChanges))
+    pure (firstT |> accumulatedT, children childrenInitial (pure <$> childrenChanges))
