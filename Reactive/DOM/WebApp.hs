@@ -57,6 +57,7 @@ import Data.Proxy
 import Data.Algebraic.Product
 import Data.List (intersperse)
 import qualified Data.Text as T
+import Reactive.Banana.Combinators
 import Reactive.Banana.Frameworks
 import Reactive.Sequence
 import Reactive.DOM.Node
@@ -70,14 +71,6 @@ import GHCJS.DOM.History
 import GHCJS.DOM.EventM
 import Data.JSString.Text
 import Web.HttpApiData
-
-{-
-import GHCJS.DOM.Document hiding (getLocation)
-import Reactive.DOM.Widget
-import Reactive.DOM.Node (render)
-import Reactive.Banana.Combinators
-import GHCJS.DOM
--}
 
 -- | A Flow () s t with a DOM Window and some router hidden under a reader.
 --   Those data are necessary to manipulate browser history state and to
@@ -345,95 +338,25 @@ webApp window router notFound = widget $ \_ -> do
     -- The web is weird.
     unbind <- liftMomentIO . liftIO $ on window popState (liftIO onPopState)
     let first = arr (\i -> (i, state)) >>> runReader (runWebAppFlow (start Proxy notFound))
-    let seqnc :: Sequence MomentIO (Flow () () Void)
+    let seqnc :: Sequence (Flow () () Void)
         seqnc = first |> rest
     liftMomentIO (sequenceReactimate (const (putStrLn "webApp : flow changing") <$> seqnc))
     -- Make every flow div inherit all style from the webApp div.
     let inheritAll = always . Set $ makeStyle [("all", "inherit")]
     let inheritAllModifier = modifier $ \x -> style inheritAll >> pure x
-    let makeUI :: Flow () () Void -> UI (Sequence MomentIO ())
+    let makeUI :: Flow () () Void -> UI (Sequence ())
         makeUI flow = ui (div (runFlow flow) `modify` inheritAllModifier)
         -- NB the following will not typecheck.
         --   makeUI = ui . div . runFlow
         -- Why?
-        --   runFlow :: Flow o s Void -> (forall tag . Widget tag s (Sequence MomentIO o))
+        --   runFlow :: Flow o s Void -> (forall tag . Widget tag s (Sequence o))
         --   div :: (forall tag . Widget tag s t) -> Widget "div" s t
         --   ui :: forall tag t . W3CTag  tag => Widget tag () t -> UI t
         -- Could it be a bug? Surely if
         --   f (g x)
         -- is well typed then so too is
         --   f . g
-    let childrenSequence :: forall inp out . Sequence MomentIO (NodeList (Sequence MomentIO ()) inp out SetChild)
+    let childrenSequence :: forall inp out . Sequence (NodeList (Sequence ()) inp out SetChild)
         childrenSequence = nodeList . pure . newChild . makeUI <$> seqnc
-    (firstChild, restChild) <- liftMomentIO (runSequence childrenSequence)
+    (firstChild, restChild) <- liftMoment $ runSequence childrenSequence
     pure ((), children firstChild (pure <$> restChild))
-
-
-{-
-type Ex1 = Piece "a" :</> Capture Int :</> Root
-type Ex2 = Piece "b" :</> Root
-type Ex3 = Piece "c" :</> Root
-type Ex4 = Root
-
-type Combined =
-         Ex1
-    :<|> Ex2
-    :<|> Ex3
-    :<|> Ex4
-
-ex1 :: WebAppFlow Combined (RouteInput Ex1) Void
-ex1 = proc (i :*: ()) -> do
-    () <- webAppFlow w -< i
-    jumpTo Proxy (Proxy :: Proxy Ex2) -< ()
-  where
-    w = widgetFlow1 $ \i -> do
-            let l = withEvent Click const
-                  $ label (always (T.pack (show i)))
-            (ev, velem) <- runWidget <$> l
-            pure $ (Widget ((), velem), ev)
-
-ex2 :: WebAppFlow Combined (RouteInput Ex2) Void
-ex2 = proc () -> do
-    () <- webAppFlow w -< ()
-    jumpTo Proxy (Proxy :: Proxy Ex1) -< (42 .*. ())
-  where
-    w = widgetFlow1 $ \() -> do
-            (ev, velem) <- runWidget <$> withEvent Click const (label (always (T.pack "B")))
-            pure (Widget ((), velem), ev)
-
-ex3 :: WebAppFlow Combined (RouteInput Ex3) Void
-ex3 = undefined -- impureFlow $ \() -> liftIO (putStrLn "Gotcha") >> undefined
-
-ex4 :: WebAppFlow Combined () Void
-ex4 = undefined
-
-combinedRouter :: Router Combined
-combinedRouter = makeRouter (Proxy :: Proxy Combined) combined
-  where
-    combined =
-             ex1
-        :<|> ex2
-        :<|> ex3
-        :<|> ex4
-
-main = runWebGUI $ \webView -> do
-
-    Just document <- webViewGetDomDocument webView
-    Just body <- getBody document
-
-    let notFound = liftReader $ widgetFlow1 $ \_ -> do
-            w <- label (always (T.pack "Not found"))
-            pure (w, never)
-
-    let networkDescription = do
-
-            ui <- webApp webView combinedRouter notFound
-            (_, velem) <- runWidget <$> runFlow ui ()
-            _ <- render document body velem
-            pure ()
-
-    network <- compile networkDescription
-    actuate network
-    pure ()
-
--}

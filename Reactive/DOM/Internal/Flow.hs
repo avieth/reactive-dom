@@ -261,7 +261,7 @@ runFlowGeneral flow k = case flow of
 runFlow
     :: forall o s .
        Flow o s Void
-    -> OpenWidget s (Sequence MomentIO o)
+    -> OpenWidget s (Sequence o)
 runFlow flow = widget $ \(s, viewChildren) -> do
 
     let first :: (o, Event (MomentIO (Either Void (FlowContinuation o Void))))
@@ -271,11 +271,13 @@ runFlow flow = widget $ \(s, viewChildren) -> do
 
     -- A sequence of events, each of which gives a MomentIO producing
     -- the next Widget to show and the next continuation.
-    let conts :: Sequence MomentIO (Event (MomentIO (FlowContinuation o Void)))
+    let conts :: Sequence (Event (MomentIO (FlowContinuation o Void)))
         conts =  ((fmap . fmap) (either absurd id) . snd  $ first)
               |> ((fmap . fmap) (either absurd id) . snd <$> rest)
+    switchedConts :: Event (MomentIO (FlowContinuation o Void))
+        <- liftMoment $ sequenceSwitchE conts
     changeEvents :: Event (FlowContinuation o Void)
-        <- liftMomentIO (sequenceSwitchE conts >>= execute)
+        <- liftMomentIO $ execute switchedConts
 
     -- We can take the first FlowContinuation. We know it's there because
     -- the Left variant from runFlowGeneral is Void.

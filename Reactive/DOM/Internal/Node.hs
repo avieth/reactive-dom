@@ -333,7 +333,7 @@ makeChildrenInput
     => Document
     -> Children f
     -> MomentIO ( ViewChildren f
-                , Sequence MomentIO [ChildrenMutation SomeNode SomeNode]
+                , Sequence [ChildrenMutation SomeNode SomeNode]
                 )
 makeChildrenInput document childrenOutput = mdo
 
@@ -364,7 +364,7 @@ makeChildrenInput document childrenOutput = mdo
         firstMutation = AppendChild <$> childrenContainerList childNode firstChildren
     let restMutations :: Event [ChildrenMutation SomeNode SomeNode]
         restMutations = snd <$> restChildren
-    let mutationSequence :: Sequence MomentIO [ChildrenMutation SomeNode SomeNode]
+    let mutationSequence :: Sequence [ChildrenMutation SomeNode SomeNode]
         mutationSequence = firstMutation |> restMutations
 
     -- This give some indication of which DOM mutations are happening.
@@ -413,8 +413,8 @@ buildUI (ClosedWidget _ widget) = buildWidget widget ()
 
 reactimateChildren
     :: Element
-    -> Sequence MomentIO [ChildrenMutation SomeNode SomeNode]
-    -> MomentIO (Sequence MomentIO ())
+    -> Sequence [ChildrenMutation SomeNode SomeNode]
+    -> MomentIO (Sequence ())
 reactimateChildren parent seqnc = do
     sequenceCommute (liftIO . flip runChildrenMutationsIO parent <$> seqnc)
 
@@ -684,14 +684,14 @@ type ElementSchemaChild = Either Element Text
 
 -- | Description of a DOM element.
 data ElementSchema = ElementSchema {
-      elementSchemaProperties :: Sequence MomentIO [Properties]
-    , elementSchemaAttributes :: Sequence MomentIO [Attributes]
-    , elementSchemaStyle :: Sequence MomentIO [Style]
+      elementSchemaProperties :: Sequence [Properties]
+    , elementSchemaAttributes :: Sequence [Attributes]
+    , elementSchemaStyle :: Sequence [Style]
     -- Sometimes we need to do some effectful work on a proper DOM element in
     -- order to get what we want. For instance, using external libraries like
     -- Leaflet (map visualizations). We throw in the document for good
     -- measure.
-    , elementSchemaPostprocess :: Sequence MomentIO Postprocess
+    , elementSchemaPostprocess :: Sequence Postprocess
     }
 
 newtype Postprocess = Postprocess {
@@ -723,7 +723,7 @@ emptySchema =
                       postProcess
 
 schemaStyle
-    :: Sequence MomentIO (Action Style)
+    :: Sequence (Action Style)
     -> ElementSchema
     -> ElementSchema
 schemaStyle actions schema = schema {
@@ -731,13 +731,13 @@ schemaStyle actions schema = schema {
     }
   where
     mergeStyle
-        :: Sequence MomentIO (Action Style)
-        -> Sequence MomentIO [Style]
-        -> Sequence MomentIO [Style]
+        :: Sequence (Action Style)
+        -> Sequence [Style]
+        -> Sequence [Style]
     mergeStyle actions seqnc = runAction <$> actions <*> seqnc
 
 schemaAttributes
-    :: Sequence MomentIO (Action Attributes)
+    :: Sequence (Action Attributes)
     -> ElementSchema
     -> ElementSchema
 schemaAttributes actions schema = schema {
@@ -745,13 +745,13 @@ schemaAttributes actions schema = schema {
     }
   where
     mergeAttributes
-        :: Sequence MomentIO (Action Attributes)
-        -> Sequence MomentIO [Attributes]
-        -> Sequence MomentIO [Attributes]
+        :: Sequence (Action Attributes)
+        -> Sequence [Attributes]
+        -> Sequence [Attributes]
     mergeAttributes actions seqnc = runAction <$> actions <*> seqnc
 
 schemaProperties
-    :: Sequence MomentIO (Action Properties)
+    :: Sequence (Action Properties)
     -> ElementSchema
     -> ElementSchema
 schemaProperties actions schema = schema {
@@ -759,13 +759,13 @@ schemaProperties actions schema = schema {
     }
   where
     mergeProperties
-        :: Sequence MomentIO (Action Properties)
-        -> Sequence MomentIO [Properties]
-        -> Sequence MomentIO [Properties]
+        :: Sequence (Action Properties)
+        -> Sequence [Properties]
+        -> Sequence [Properties]
     mergeProperties actions seqnc = runAction <$> actions <*> seqnc
 
 schemaPostprocess
-    :: Sequence MomentIO Postprocess
+    :: Sequence Postprocess
     -> ElementSchema
     -> ElementSchema
 schemaPostprocess post schema = schema {
@@ -773,9 +773,9 @@ schemaPostprocess post schema = schema {
     }
   where
     mergePostprocess
-        :: Sequence MomentIO Postprocess
-        -> Sequence MomentIO Postprocess
-        -> Sequence MomentIO Postprocess
+        :: Sequence Postprocess
+        -> Sequence Postprocess
+        -> Sequence Postprocess
     mergePostprocess new existing = (flip sequencePostprocess) <$> new <*> existing
 
 runElementSchema :: ElementSchema -> Document -> Element -> MomentIO ()
@@ -795,11 +795,11 @@ runElementSchema eschema document el = do
 
   where
 
-    reactimatePostprocess :: Document -> Element -> Sequence MomentIO Postprocess -> MomentIO ()
+    reactimatePostprocess :: Document -> Element -> Sequence Postprocess -> MomentIO ()
     reactimatePostprocess document element sequence = do
         sequenceReactimate ((\x -> runPostprocess x document element) <$> sequence)
 
-    reactimateProperties :: Element -> Sequence MomentIO [Properties] -> MomentIO ()
+    reactimateProperties :: Element -> Sequence [Properties] -> MomentIO ()
     reactimateProperties element sequence = do
         currentProperties <- liftIO $ newIORef mempty
         let changeProperties :: [Properties] -> IO ()
@@ -834,7 +834,7 @@ runElementSchema eschema document el = do
         justWhenDifferent x y = if x /= y then Just x else Nothing
 
 
-    reactimateAttributes :: Element -> Sequence MomentIO [Attributes] -> MomentIO ()
+    reactimateAttributes :: Element -> Sequence [Attributes] -> MomentIO ()
     reactimateAttributes element sequence = do
         currentAttributes <- liftIO $ newIORef mempty
         let changeAttributes new = do
@@ -866,7 +866,7 @@ runElementSchema eschema document el = do
         justWhenDifferent x y = if x /= y then Just x else Nothing
 
 
-    reactimateStyle :: Element -> Sequence MomentIO [Style] -> MomentIO ()
+    reactimateStyle :: Element -> Sequence [Style] -> MomentIO ()
     reactimateStyle element sequence = do
         currentStyle <- liftIO $ newIORef mempty
         let changeStyle new = do
@@ -924,7 +924,7 @@ removeJSProperty thing x = nullableToMaybe <$> js_removeJSProperty (pToJSVal thi
 
 style
     :: W3CTag tag
-    => Sequence MomentIO (Action Style)
+    => Sequence (Action Style)
     -> ElementBuilder tag ()
 style s = ElementBuilder $ lift (tell (Dual (Endo (schemaStyle s))))
 
@@ -944,19 +944,19 @@ styleHover s = do
 
 attributes
     :: W3CTag tag
-    => Sequence MomentIO (Action Attributes)
+    => Sequence (Action Attributes)
     -> ElementBuilder tag ()
 attributes a = ElementBuilder $ lift (tell (Dual (Endo (schemaAttributes a))))
 
 properties
     :: W3CTag tag
-    => Sequence MomentIO (Action Properties)
+    => Sequence (Action Properties)
     -> ElementBuilder tag ()
 properties p = ElementBuilder $ lift (tell (Dual (Endo (schemaProperties p))))
 
 postprocess
     :: W3CTag tag
-    => Sequence MomentIO Postprocess
+    => Sequence Postprocess
     -> ElementBuilder tag ()
 postprocess p = ElementBuilder $ lift (tell (Dual (Endo (schemaPostprocess p))))
 

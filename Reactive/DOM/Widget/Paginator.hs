@@ -82,7 +82,7 @@ paginator = lmap makeInput (rmap' makeOutput product)
             getClickEvent (NodeList (x : _)) = childData x
         let childrenSequence = viewChildrenInitial viewChildren |> viewChildrenEvent viewChildren
         let clickEventSequence = getClickEvent <$> childrenSequence
-        click <- sequenceSwitchE clickEventSequence
+        click <- liftMoment (sequenceSwitchE clickEventSequence)
         let makeChildren :: forall inp out . PaginatorState -> NodeList (Event ()) inp out SetChild
             makeChildren x = case x of
                 Incomplete -> nodeList [newChild button]
