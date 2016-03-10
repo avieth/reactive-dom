@@ -114,7 +114,7 @@ paginator = lmap makeInput (rmap' makeOutput product)
         :: (Sequence (Sum Int, t), Event ())
         -> ElementBuilder tag (Sequence t, Event PaginatorOutput)
     makeOutput (seqnc, click) = do
-        total <- behavior (fst <$> seqnc)
+        total <- sequenceBehavior (fst <$> seqnc)
         let output = (Fetch . getSum <$> total) <@ click
         pure (snd <$> seqnc, output)
 

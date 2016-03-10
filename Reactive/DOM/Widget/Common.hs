@@ -23,12 +23,14 @@ import Reactive.Banana.Combinators
 import Reactive.Sequence
 import Data.Profunctor
 
-varyingText :: OpenWidget (T.Text, Event T.Text) ()
-varyingText = widget $ \(~((txt, evTxt), _)) ->
-    pure ((), children (Single (textChild txt)) (pure . Single . textChild <$> evTxt))
+varyingText :: OpenWidget (Sequence T.Text) ()
+varyingText = widget $ \(~(seqnc, _)) -> do
+    initial <- sequenceFirst seqnc
+    rest <- sequenceEvent seqnc
+    pure ((), children (Single (textChild initial)) (pure . Single . textChild <$> rest))
 
 constantText :: OpenWidget T.Text ()
-constantText = lmap (\t -> (t, never)) varyingText
+constantText = lmap always varyingText
 
 div :: OpenWidget s t -> Widget "div" s t
 div = id

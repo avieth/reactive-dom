@@ -33,7 +33,7 @@ oneOf
        , Ord enum
        )
     => (enum -> ClosedWidget s t)
-    -> OpenWidget (s, (enum, Event enum)) t
+    -> OpenWidget (s, Sequence enum) t
 oneOf mkThing = lmap' getInput contents
 
   where
@@ -46,12 +46,12 @@ oneOf mkThing = lmap' getInput contents
 
     getInput
         :: forall tag .
-           (s, (enum, Event enum))
+           (s, Sequence enum)
         -> ElementBuilder tag (s, enum, Event (enum, enum))
-    getInput (s, (initial, changes)) = do
-        be <- stepper initial changes
-        let tupled = (,) <$> be <@> changes
-        pure (s, initial, tupled)
+    getInput (s, seqnc) = do
+        initial <- sequenceFirst seqnc
+        changes <- sequenceChanges seqnc
+        pure (s, initial, changes)
 
     withFocusEvent
         :: forall s t .

@@ -16,6 +16,7 @@ module Reactive.DOM.Widget.Picture (
       PictureSource(..)
     , DataUri(..)
     , picture
+    , divPicture
 
     ) where
 
@@ -26,6 +27,7 @@ import Reactive.Sequence
 import Reactive.DOM.Node
 import Reactive.DOM.Children.Static
 import Reactive.DOM.Children.NodeList
+import Debug.Trace
 
 data PictureSource = PictureSourceDataUri DataUri
 
@@ -47,9 +49,17 @@ dataUri duri = T.concat [
     ]
 
 -- | A static picture.
-picture :: ClosedWidget PictureSource ()
-picture = closeWidget Tag (lmap' setup (trivialWidget :: Widget "img" () ()))
+picture :: Widget "img" PictureSource ()
+picture = lmap' setup (trivialWidget :: Widget "img" () ())
   where
     setup psource = attributes (always (mkAttributes psource))
     mkAttributes (PictureSourceDataUri duri) = Set (makeAttributes [("src", dataUri duri)])
-    setAttributes psource = attributes (always (mkAttributes psource))
+
+-- | Like picture, but a div with a background image rather than an img element.
+divPicture :: Widget "div" PictureSource ()
+divPicture = lmap' setup trivialWidget
+  where
+    setup psource = style (always (mkStyle psource))
+    mkStyle (PictureSourceDataUri duri) = Set $ makeStyle [
+          ("background-image", mconcat ["url(", dataUri duri, ")"])
+        ]

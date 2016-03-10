@@ -32,6 +32,7 @@ library
                      , Reactive.DOM.Widget.Picture
                      , Reactive.DOM.Widget.Paginator
                      , Reactive.DOM.Widget.Tabular
+                     , Reactive.DOM.Widget.OneOf
 
   other-modules:       Reactive.DOM.Internal.Node
                      , Reactive.DOM.Internal.Tag
