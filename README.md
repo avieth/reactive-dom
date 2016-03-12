@@ -1,7 +1,7 @@
 # reactive-dom
 
 Definitions in this project help the programmer to wire up a reactive DOM user
-interface, expressed in Haskell via reactive-sequence and ghcjs-dom, and
+interface, expressed in Haskell via reactive-banana and ghcjs-dom, and
 compiled to JavaScript using ghcjs.
 
 This is **experimental** software, but it's also **working** software!
@@ -24,6 +24,7 @@ render
     :: (IsDocument document, IsNode parent)
     -> document
     -> parent
+    -> UI t
     -> MomentIO (RenderedNode, t)
 
 unrender :: RenderedNode -> MomentIO ()
@@ -44,10 +45,13 @@ type Widget (tag :: Symbol) s t
 -- an OpenWidget.
 type OpenWidget s t = forall tag . Widget tag s t
 
--- A `UI t` is a `Widget tag s t` where the `tag` is a valid W3C tag, and
--- the input is trivial.
-data UI t where
-    UI :: W3CTag tag => Widget tag () t
+-- On the other hand, if we know the tag then we have a ClosedWidget
+-- (W3CTag tag implies KnownSymbol tag).
+data ClosedWidget s t where
+    ClosedWidget :: W3CTag tag => Widget tag s t -> ClosedWidget s t
+
+-- A ClosedWidget with trivial input is ready to be rendered.
+data UI t = ClosedWidget () t
 ```
 
 So what's in a `Widget tag s t`? It includes a derivation of a `t` from an
@@ -65,7 +69,9 @@ Notice the `f` parameter. This brings us to an important piece of
 infrastructure. When working with plain JavaScript, any DOM element has a list
 of children. Even if we know the structure of our element, we always have to
 work with a list of children. In this library, the children of a `Widget` are
-structured by an arbitrary `f :: (* -> *) -> *`. Some example choices:
+structured by an arbitrary `f :: (* -> *) -> *`. Actaully, it's a bit more
+complicated: the container type depends also on the input and output types
+`s`, `t`. Some example choices:
 
 ```Haskell
 -- A single child carrying a value of type t.
@@ -122,9 +128,9 @@ containers to implement DOM mutations more efficiently.
 Once this part of the `Widget` is described, it can't be changed; the children
 container `f` is locked away inside the `Widget` constructor. But we can still
 augment a `Widget` with style, attributes, properties, take DOM events, and
-alter its input/output using the `Profunctor` interface. What's more, if it's
-an `OpenWidget` (its tag is unconstrained), then we can "horizontally compose"
-it:
+alter its input/output purely using the `Profunctor` interface. What's more, if
+it's an `OpenWidget` (its tag is unconstrained), then we can "horizontally
+compose" it:
 
 ```Haskell
 -- Concatenate the children of the two Widgets.
@@ -139,15 +145,16 @@ attributes, properties, or events, and that's very important because the
 `widgetProduct` is flat: if one of them had style directives, they would
 apply to the whole product, probably leading to a clash.
 
-Any `OpenWidget` may be given a tag, and therefore closed. Any `Widget` may
-be opened by deriving a new `Widget` which contains it as its sole child.
+Any `OpenWidget` may be given a tag, and therefore closed. Any `ClosedWidget`
+may be opened by deriving a new `Widget` which contains it as its sole child.
 
 ```Haskell
 closeWidget :: Tag tag -> OpenWidget s t -> Widget s t
-openWidget :: W3CTag tag => Widget tag s t -> OpenWidget s t
+openWidget :: ClosedWidget s t -> OpenWidget s t
 ```
 
 And so a pattern for UI composition arises: open the `Widget`s, horizontally
 compose them, interconnect their inputs and outputs using the `Profunctor`
-interface, possibly tying a recursive knot (specifying input in terms of output),
-and then close the composite by giving it a tag.
+interface or `Modifier` if a `MonadMoment` is required, possibly tying a
+recursive knot (specifying input in terms of output), and then close the
+composite by giving it a tag.

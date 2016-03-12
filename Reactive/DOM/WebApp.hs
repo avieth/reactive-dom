@@ -343,9 +343,9 @@ webApp window router notFound = widget $ \_ -> do
     liftMomentIO (sequenceReactimate (const (putStrLn "webApp : flow changing") <$> seqnc))
     -- Make every flow div inherit all style from the webApp div.
     let inheritAll = always . Set $ makeStyle [("all", "inherit")]
-    let inheritAllModifier = modifier $ \x -> style inheritAll >> pure x
+    let inheritAllModifier = modifier $ \_ x -> style inheritAll >> pure x
     let makeUI :: Flow () () Void -> UI (Sequence ())
-        makeUI flow = ui (div (runFlow flow) `modify` inheritAllModifier)
+        makeUI flow = ui (div (runFlow flow) `modifyr` inheritAllModifier)
         -- NB the following will not typecheck.
         --   makeUI = ui . div . runFlow
         -- Why?

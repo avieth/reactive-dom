@@ -55,16 +55,16 @@ hr = trivialWidget
 
 -- | A button which shows text and gives a click event.
 simpleButton :: Widget "button" T.Text (Event ())
-simpleButton = button constantText `modify` modifier (const (event Click))
+simpleButton = button constantText `modifyr` modifier (const (const (event Click)))
 
 -- | The text displayed here is not determined by children, but by the value
 --   property, so it can be played with through the Modification interface.
 textInput :: Widget "input" () (Event T.Text)
-textInput = input trivialWidget `modify` modifier (const (event Input))
+textInput = input trivialWidget `modifyr` modifier (const (const (event Input)))
 
 -- | Same as textInput but we set the type attribute to password for you.
 passwordInput :: Widget "input" () (Event T.Text)
-passwordInput = textInput `modify` modifier setPasswordType
+passwordInput = textInput `modifyr` modifier setPasswordType
   where
-    setPasswordType event = attributes (always (Set attrs)) >> pure event
+    setPasswordType _ event = attributes (always (Set attrs)) >> pure event
     attrs = makeAttributes [("type", "password")]

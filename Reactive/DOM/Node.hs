@@ -32,9 +32,7 @@ module Reactive.DOM.Node (
     , closeWidget
     , passthrough
     , tieKnot
-    , dimap'
-    , lmap'
-    , rmap'
+    , tieKnot'
     , Children
     , constantChildren
     , children
@@ -68,6 +66,9 @@ module Reactive.DOM.Node (
     , Modifier
     , modifier
     , modify
+    , modify_
+    , modifyr
+    , modifyl
 
     , Element
     , Document

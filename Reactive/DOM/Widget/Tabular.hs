@@ -65,7 +65,7 @@ tabs mkThing = tieKnot (rmap getOutput contents) loop
     withEnumEvent (enum, ClosedWidget tag w) =
         ClosedWidget tag w'
       where
-        w' = dimap' input output w
+        w' = modify (modifier (const input)) (modifier (const output)) w
         output ev = pure (SemigroupEvent (fmap (const (First enum)) ev))
         input (s, seqnc) = do
             initial <- sequenceFirst seqnc

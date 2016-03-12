@@ -32,7 +32,7 @@ import Control.Category
 import Control.Monad
 import Control.Monad.IO.Class
 import Control.Monad.Trans.Class (lift)
-import Control.Monad.Trans.State
+import Control.Monad.Trans.State hiding (modify)
 import Control.Monad.Trans.Writer
 import Control.Monad.Fix
 import Data.Proxy
@@ -236,6 +236,33 @@ tieKnot (Widget l mk r) f = Widget l' mk r'
         ~(pb, t) <- r pf q
         pure ((pb, t), t)
 
+-- | A more general knot tyer: use the output and some new input type to define
+--   the old input type and some new output type.
+tieKnot'
+    :: forall tag s t newS newT .
+       Widget tag s t
+    -> (t -> newS -> ElementBuilder tag (s, newT))
+    -> Widget tag newS newT
+tieKnot' (Widget l mk r) f = Widget l' mk r'
+  where
+    -- To make the input we require access to the output t, so we find it in
+    -- the passback. The new output is produced, so we must pass that forward.
+    --
+    -- Another idea: maybe f should run in r', and pass the input back to
+    -- l. With this scheme, the original l must use the input lazily.
+    -- With current scheme, f must use the input lazily. Hm, yeah it's
+    -- probably better as it is now. It's just a little annoying: even
+    -- getSequence will cause divergence.
+    l' ~(pb, t) newS = do
+        ~(s, newT) <- f t newS
+        ~(pf, r) <- l pb s
+        pure ((pf, newT), r)
+    r' ~(pf, newT) q = do
+        ~(pb, t) <- r pf q
+        pure ((pb, t), newT)
+
+
+{-
 -- | Like dimap, but we allow you to MomentIO.
 dimap'
     :: (q -> ElementBuilder tag s)
@@ -255,6 +282,7 @@ lmap' l = dimap' l pure
 
 rmap' :: (t -> ElementBuilder tag u) -> Widget tag s t -> Widget tag s u
 rmap' r = dimap' pure r
+-}
 
 widget
     :: ( ChildrenContainer (f s t) )
@@ -290,41 +318,76 @@ type UI t = ClosedWidget () t
 ui :: forall tag t . W3CTag tag => Widget tag () t -> UI t
 ui = closeWidget Tag
 
--- | A modifier uses the output, model, and children of some Widget to
---   alter the output. It cannot change the model nor the children, just the
---   output value and type.
-newtype Modifier tag s t = Modifier {
-      runModifier :: s -> ElementBuilder tag t
+-- | Whereas the Profunctor interface allows us to use pure functiosn to juggle
+--   the input and output of a Widget, a Modifier does the same but with
+--   ElementBuilder effects.
+newtype Modifier tag input output t = Modifier {
+      runModifier :: input -> output -> ElementBuilder tag t
     }
 
-instance Functor (Modifier tag s) where
-    fmap f = Modifier . (fmap . fmap) f . runModifier
+instance Functor (Modifier tag input output) where
+    fmap f = Modifier . (fmap . fmap . fmap) f . runModifier
 
-instance Applicative (Modifier tag s) where
-    pure = Modifier . pure . pure
-    (Modifier mf) <*> (Modifier mx) = Modifier $ \s ->
-        ($) <$> mf s <*> mx s
+instance Applicative (Modifier tag input output) where
+    pure = Modifier . pure . pure . pure
+    (Modifier mf) <*> (Modifier mx) = Modifier $ \s t ->
+        ($) <$> mf s t <*> mx s t
 
-instance Monad (Modifier tag s) where
+instance Monad (Modifier tag input output) where
     return = pure
-    (Modifier mx) >>= k = Modifier $ \s -> do
-        y <- mx s
-        runModifier (k y) s
+    (Modifier mx) >>= k = Modifier $ \s t -> do
+        y <- mx s t
+        runModifier (k y) s t
 
-modifier :: (s -> ElementBuilder tag t) -> Modifier tag s t
+idModifier :: Modifier tag input output output
+idModifier = modifier $ \_ -> pure
+
+modifier :: (s -> t -> ElementBuilder tag u) -> Modifier tag s t u
 modifier = Modifier
 
 modify
+    :: forall tag s t s' t' .
+       Modifier tag t s' s
+    -> Modifier tag s t t'
+    -> Widget tag s t
+    -> Widget tag s' t'
+modify ml mr (Widget l mk r) = Widget l' mk r'
+  where
+    -- Modify l so that it passes its unmodified input forward, for use by r.
+    l' ~(pb, t) s' = do
+        s <- runModifier ml t s'
+        ~(pf, r) <- l pb s
+        pure ((pf, s), r)
+    -- Modify r so that it passes its unmodified output forward, for use by l.
+    r' ~(pf, s) q = do
+        ~(pb, t) <- r pf q
+        t' <- runModifier mr s t
+        pure ((pb, t), t')
+
+-- | Like modifyr, but only for an effect.
+--   Since it's just for the effect, we choose a right-modify (modifyr) because
+--   it's less likely that the programmer will make a mistake by forcing a lazy
+--   parameter (modifyl's modifier must be lazy in its first parameter).
+modify_
+    :: forall tag s t .
+       Widget tag s t
+    -> Modifier tag s t ()
+    -> Widget tag s t
+modify_ w m = modifyr w (m *> modifier (const pure))
+
+modifyr
     :: forall tag s t u .
        Widget tag s t
-    -> Modifier tag t u
+    -> Modifier tag s t u
     -> Widget tag s u
-modify (Widget l mk r) modifier = Widget l mk r'
-  where
-    r' pf q = do
-        ~(pb, t) <- r pf q
-        u <- runModifier modifier t
-        pure (pb, u)
+modifyr w mr = modify idModifier mr w
+
+modifyl
+    :: forall tag s t u .
+       Widget tag s t
+    -> Modifier tag t u s
+    -> Widget tag u t
+modifyl w ml = modify ml idModifier w
 
 makeChildrenInput
     :: forall f .

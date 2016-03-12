@@ -61,7 +61,7 @@ paginator
        ( Monoid t )
     => OpenWidget (Sequence (PaginatorInput t))
                   (Sequence t, Event PaginatorOutput)
-paginator = lmap makeInput (rmap' makeOutput product)
+paginator = lmap makeInput (product `modifyr` modifier (const makeOutput))
   where
 
     makePaginatorState :: PaginatorInput t -> PaginatorState
@@ -120,7 +120,7 @@ paginator = lmap makeInput (rmap' makeOutput product)
 
     button :: UI (Event ())
     button = let open = lmap (const "Get more") (span constantText)
-                 closed = rmap' (const (event Click)) open
+                 closed = open `modifyr` modifier (const (const (event Click)))
              in  ui closed
 
     loading :: UI (Event ())

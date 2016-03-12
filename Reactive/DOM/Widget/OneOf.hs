@@ -34,7 +34,7 @@ oneOf
        )
     => (enum -> ClosedWidget s t)
     -> OpenWidget (s, Sequence enum) t
-oneOf mkThing = lmap' getInput contents
+oneOf mkThing = contents `modifyl` modifier (const getInput)
 
   where
 
@@ -58,7 +58,7 @@ oneOf mkThing = lmap' getInput contents
            (enum, ClosedWidget s t)
         -> ClosedWidget (s, enum, Event (enum, enum)) t
     withFocusEvent (enum, ClosedWidget tag w) =
-        ClosedWidget tag (lmap' (focus enum) w)
+        ClosedWidget tag (w `modifyl` modifier (const (focus enum)))
 
     -- Given an index, and an event indicating which indexes should be hidden
     -- and shown, style a widget to respect the hide/show via the CSS display
@@ -76,6 +76,8 @@ oneOf mkThing = lmap' getInput contents
                                 (const (Unset hideStyle) <$> showMe)
                                 (const (Set hideStyle) <$> hideMe)
         -- Everything but the 0th is initially set to hidden.
+        -- We must ensure that this style overrides any other display style
+        -- directives. Possible?
         let initialStyle = if myIndex /= initial then Set hideStyle else NoOp
         style (initialStyle |> combined)
         pure s

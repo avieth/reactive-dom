@@ -29,7 +29,7 @@ nodeListWidget
     => OpenWidget (Sequence [UI t]) (Sequence t)
 nodeListWidget = widget $ \(~(seqnc, viewChildren)) -> do
 
-    (initial, rest) <- liftMoment $ runSequence seqnc
+    ~(initial, rest) <- getSequence seqnc
 
     -- Values are derived from the viewChildren.
     let concatOne :: forall inp out . NodeList t inp out Child -> t
@@ -64,7 +64,7 @@ monotoneListWidget
     => OpenWidget (Sequence [UI t]) (Sequence t)
 monotoneListWidget = widget $ \(~(seqnc, viewChildren)) -> mdo
 
-    (initial, changes) <- liftMoment $ runSequence seqnc
+    ~(initial, changes) <- getSequence seqnc
 
     -- Use the ViewChildren to come up with the output sequence.
     let concatOne :: forall inp out . MonotoneList t inp out Child -> t

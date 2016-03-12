@@ -37,15 +37,15 @@ deriving instance Semigroup (NodeList t inp out f)
 deriving instance Monoid (NodeList t inp out f)
 
 instance FunctorTransformer (NodeList t inp out) where
-    functorTrans trans (NodeList list) = NodeList (fmap trans list)
-    functorCommute (NodeList aps) = NodeList <$> sequenceA (getCompose <$> aps)
+    functorTrans trans (~(NodeList list)) = NodeList (fmap trans list)
+    functorCommute (~(NodeList aps)) = NodeList <$> sequenceA (getCompose <$> aps)
 
 instance ChildrenContainer (NodeList t inp out) where
     type Change (NodeList t inp out) = NodeList t inp out
     getChange get (NodeList news) (NodeList olds) =
         let editList = edits (==) (get <$> olds) (get <$> news)
             mutations = runEditList editList
-        in  (NodeList news, runEditList editList)
+        in  (NodeList news, reverse mutations)
     childrenContainerList get (NodeList lst) = get <$> lst
 
 nodeList :: [f t] -> NodeList t inp out f
