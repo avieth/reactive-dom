@@ -40,6 +40,7 @@ module Reactive.DOM.WebApp (
     , makeRouterStructure
     , MakeRouter
     , makeRouter
+    , getUrl
     , jumpTo
     , start
     , webApp
@@ -67,6 +68,7 @@ import Reactive.DOM.Widget.Common
 import GHCJS.Types
 import GHCJS.DOM.Window hiding (error, print, getWindow)
 import GHCJS.DOM.Location (getPathname)
+import qualified GHCJS.DOM.Location as Location
 import GHCJS.DOM.History
 import GHCJS.DOM.EventM
 import Data.JSString.Text
@@ -105,6 +107,12 @@ alterWebAppFlow f = WebAppFlow . ReaderArrow . f . runReader . runWebAppFlow
 -- DO NOT EXPORT
 getWindow :: WebAppFlow router () Window
 getWindow = readState >>> arr fst
+
+getOrigin :: WebAppFlow router () T.Text
+getOrigin = proc () -> do
+    window <- getWindow -< ()
+    Just location <- webAppFlow . impureFlow $ getLocation -< window
+    webAppFlow . impureFlow $ Location.getOrigin -< location
 
 -- DO NOT EXPORT
 getRouter :: WebAppFlow router () (Router router)
@@ -285,10 +293,19 @@ getPathParts = impureFlow $ \window -> do
 
 setHistory :: forall o . Flow o (Window, T.Text) ()
 setHistory = impureFlow $ \(window, urlpath) -> do
-    liftIO (putStrLn (show (mconcat ["Setting history to ", urlpath])))
+    --liftIO (putStrLn (show (mconcat ["Setting history to ", urlpath])))
     Just history <- getHistory window
     pushState history nullRef ("" :: T.Text) urlpath
     pure ()
+
+-- | Make the full URL of a given route. The window's origin is used.
+getUrl
+    :: (IsRoute route, HasRoute router router route)
+    => WebAppFlow router (Proxy route, RouteInput route) T.Text
+getUrl = proc (proxy, inp) -> do
+    origin <- getOrigin -< ()
+    path <- arr (uncurry routePath) -< (proxy, inp)
+    returnA -< mconcat [origin, path]
 
 -- | Go to the flow in a route under a particular name, prefixed by an
 --   effectful flow which pushes the window's history to the route path under
@@ -324,14 +341,14 @@ webApp
     -> WebAppFlow router () Void -- route doesn't match, use this.
     -> OpenWidget () ()
 webApp window router notFound = widget $ \_ -> do
-    liftMomentIO (liftIO (putStrLn "webApp : setting up"))
+    --liftMomentIO (liftIO (putStrLn "webApp : setting up"))
     (rest, fire) <- liftMomentIO newEvent
     let state = (window, router)
     let onPopState :: IO ()
         onPopState = do
             Just location <- getLocation window
             pathname <- textFromJSString <$> getPathname location
-            putStrLn ("webApp : window.onPopState fires with path name " ++ show pathname)
+            --putStrLn ("webApp : window.onPopState fires with path name " ++ show pathname)
             let flow = arr (\i -> (i, state)) >>> runReader (runWebAppFlow (start Proxy notFound))
             fire flow
     -- Oddly enough, popstate is also fired when history is pushed.
@@ -340,7 +357,7 @@ webApp window router notFound = widget $ \_ -> do
     let first = arr (\i -> (i, state)) >>> runReader (runWebAppFlow (start Proxy notFound))
     let seqnc :: Sequence (Flow () () Void)
         seqnc = first |> rest
-    liftMomentIO (sequenceReactimate (const (putStrLn "webApp : flow changing") <$> seqnc))
+    --liftMomentIO (sequenceReactimate (const (putStrLn "webApp : flow changing") <$> seqnc))
     -- Make every flow div inherit all style from the webApp div.
     let inheritAll = always . Set $ makeStyle [("all", "inherit")]
     let inheritAllModifier = modifier $ \_ x -> style inheritAll >> pure x
