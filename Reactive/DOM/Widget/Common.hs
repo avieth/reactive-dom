@@ -20,6 +20,7 @@ import Reactive.DOM.Children.Static
 import Reactive.DOM.Children.NodeList
 import Reactive.DOM.Children.Single
 import Reactive.Banana.Combinators
+import Reactive.Banana.Frameworks
 import Reactive.Sequence
 import Data.Profunctor
 
@@ -34,6 +35,16 @@ constantText = lmap always varyingText
 
 div :: OpenWidget s t -> Widget "div" s t
 div = id
+
+a :: OpenWidget s t -> Widget "a" s t
+a = id
+
+link :: OpenWidget s t -> Widget "a" (s, T.Text) t
+link w = a (lmap fst w) `modifyr` setHref
+  where
+    setHref = modifier $ \(_, href) t -> do
+        attributes' (always [Set (makeAttributes [("href", href)])])
+        pure t
 
 p :: OpenWidget s t -> Widget "p" s t
 p = id
@@ -62,9 +73,39 @@ simpleButton = button constantText `modifyr` modifier (const (const (event Click
 textInput :: Widget "input" () (Event T.Text)
 textInput = input trivialWidget `modifyr` modifier (const (const (event Input)))
 
+textInputVarying :: Widget "input" (Sequence T.Text) (Event T.Text)
+textInputVarying = input (lmap (const ()) trivialWidget) `modifyr` setup
+  where
+    setup = modifier $ \s t -> setInputValue s t >> event Input
+
+setInputValue :: Sequence T.Text -> () -> ElementBuilder "input" ()
+setInputValue seqnc _ = do
+    -- Each text gets its own Properties, and we're careful to unset the
+    -- previous one.
+    let uniqueProperties = setValue <$> seqnc
+    initial <- sequenceFirst uniqueProperties
+    changes <- sequenceChanges uniqueProperties
+    properties' ([Set initial] |> (unsetSet <$> changes))
+    liftMomentIO (reactimate (Prelude.print <$> changes))
+    pure ()
+  where
+    setValue :: T.Text -> Properties
+    setValue txt = makeProperties [("value", txt)]
+    unsetSet :: (Properties, Properties) -> [Action Properties]
+    unsetSet (old, new) = [Unset old, Set new]
+
 -- | Same as textInput but we set the type attribute to password for you.
 passwordInput :: Widget "input" () (Event T.Text)
 passwordInput = textInput `modifyr` modifier setPasswordType
   where
     setPasswordType _ event = attributes (always (Set attrs)) >> pure event
     attrs = makeAttributes [("type", "password")]
+
+passwordInputVarying :: Widget "input" (Sequence T.Text) (Event T.Text)
+passwordInputVarying = input (lmap (const ()) trivialWidget) `modifyr` setup
+  where
+    attrs = makeAttributes [("type", "password")]
+    setup = modifier $ \s t -> do
+        attributes (always (Set attrs))
+        setInputValue s t 
+        event Input
