@@ -16,6 +16,7 @@ module Reactive.DOM.Flow (
     , impureFlow
     , widgetFlow
     , widgetFlow'
+    , flowTrans
     , flowMap
     --, alterFlow
     --, alterFlowUniform

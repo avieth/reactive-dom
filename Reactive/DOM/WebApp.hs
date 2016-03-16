@@ -78,7 +78,7 @@ import Web.HttpApiData
 --   Those data are necessary to manipulate browser history state and to
 --   resolve type-level strings to other Flows.
 newtype WebAppFlow router s t = WebAppFlow {
-      runWebAppFlow :: ReaderArrow (Window, Router router) (Flow ()) s t
+      runWebAppFlow :: ReaderArrow (Window, Router router) (Flow Void) s t
     }
 
 deriving instance Category (WebAppFlow router)
@@ -88,18 +88,18 @@ instance ArrowApply (WebAppFlow router) where
     app = WebAppFlow $ proc (flow, s) -> do
               app -< (runWebAppFlow flow, s)
 deriving instance ArrowReader (Window, Router router) (WebAppFlow router)
-instance ArrowAddReader (Window, Router router) (WebAppFlow router) (Flow ()) where
+instance ArrowAddReader (Window, Router router) (WebAppFlow router) (Flow Void) where
     liftReader = WebAppFlow . liftReader
     elimReader = elimReader . runWebAppFlow
 
-webAppFlow :: Flow () s t -> WebAppFlow router s t
+webAppFlow :: Flow Void s t -> WebAppFlow router s t
 webAppFlow = liftReader
 
 -- | Any alteration of a Flow which is polymorphic in the input can be used
 --   to modify a WebAppFlow. That poymorphism is needed because inside the
 --   flow we have actually a reader-ful arrow carrying a Window and router.
 alterWebAppFlow
-    :: (forall s . Flow () s t -> Flow () s t')
+    :: (forall s . Flow Void s t -> Flow Void s t')
     -> WebAppFlow router s t
     -> WebAppFlow router s t'
 alterWebAppFlow f = WebAppFlow . ReaderArrow . f . runReader . runWebAppFlow
@@ -355,13 +355,13 @@ webApp window router notFound = widget $ \_ -> do
     -- The web is weird.
     unbind <- liftMomentIO . liftIO $ on window popState (liftIO onPopState)
     let first = arr (\i -> (i, state)) >>> runReader (runWebAppFlow (start Proxy notFound))
-    let seqnc :: Sequence (Flow () () Void)
+    let seqnc :: Sequence (Flow Void () Void)
         seqnc = first |> rest
     --liftMomentIO (sequenceReactimate (const (putStrLn "webApp : flow changing") <$> seqnc))
     -- Make every flow div inherit all style from the webApp div.
     let inheritAll = always . Set $ makeStyle [("all", "inherit")]
     let inheritAllModifier = modifier $ \_ x -> style inheritAll >> pure x
-    let makeUI :: Flow () () Void -> UI (Sequence ())
+    let makeUI :: Flow Void () Void -> UI (Sequence (Maybe Void))
         makeUI flow = ui (div (runFlow flow) `modifyr` inheritAllModifier)
         -- NB the following will not typecheck.
         --   makeUI = ui . div . runFlow
@@ -373,7 +373,7 @@ webApp window router notFound = widget $ \_ -> do
         --   f (g x)
         -- is well typed then so too is
         --   f . g
-    let childrenSequence :: forall inp out . Sequence (NodeList (Sequence ()) inp out SetChild)
+    let childrenSequence :: forall inp out . Sequence (NodeList (Sequence (Maybe Void)) inp out SetChild)
         childrenSequence = nodeList . pure . newChild . makeUI <$> seqnc
     (firstChild, restChild) <- liftMoment $ runSequence childrenSequence
     pure ((), children firstChild (pure <$> restChild))
