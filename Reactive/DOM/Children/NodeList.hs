@@ -45,7 +45,7 @@ instance ChildrenContainer (NodeList t inp out) where
     getChange get (NodeList news) (NodeList olds) =
         let editList = edits (==) (get <$> olds) (get <$> news)
             mutations = runEditList editList
-        in  (NodeList news, reverse mutations)
+        in  (NodeList news, mutations)
     childrenContainerList get (NodeList lst) = get <$> lst
 
 nodeList :: [f t] -> NodeList t inp out f
@@ -99,12 +99,6 @@ editListSummary (EditList l _) = EditListSummary (length l) (length changes)
 
 emptyEditList :: EditList t
 emptyEditList = EditList [] 0
-
-editListFromNil :: [t] -> Int -> EditList t
-editListFromNil ts prefix = EditList (Change . AppendChild <$> take prefix ts) prefix
-
-editListToNil :: [t] -> Int -> EditList t
-editListToNil ts prefix = EditList (Change . RemoveChild <$> take prefix ts) prefix
 
 change :: ChildrenMutation t t -> EditList t -> EditList t
 change mutation elist = elist {
@@ -160,8 +154,9 @@ edits eq xs ys = table ! (m,n)
     bnds = ((0,0),(m,n))
 
     dist :: (Int, Int) -> EditList t
-    dist (0,j) = editListFromNil reversedys j
-    dist (i,0) = editListToNil reversedxs i
+    dist (0,0) = emptyEditList
+    dist (0,j) = change (AppendChild (ays ! j)) (table ! (0,j-1))
+    dist (i,0) = change (RemoveChild (axs ! i)) (table ! (i-1,0))
     dist (i,j) = minimum [
           -- Previous column element (left) in any row but the 0'th gives an
           -- InsertBefore.
