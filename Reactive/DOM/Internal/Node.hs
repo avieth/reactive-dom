@@ -714,11 +714,12 @@ instance Ord (IdentifiedMap k v) where
 
 data Action t = Set t | Unset t | NoOp
 
-runAction :: Eq t => Action t -> [t] -> [t]
-runAction action = case action of
+runAction :: Eq t => Action t -> Endo [t]
+runAction action = Endo $ case action of
     Set t -> (:) t
     Unset t -> delete t
     NoOp -> id
+
 
 type Properties = IdentifiedMap T.Text T.Text
 type Style = IdentifiedMap T.Text T.Text
@@ -785,47 +786,39 @@ emptySchema =
                       style
                       postProcess
 
+merge
+    :: Eq t
+    => Sequence [Action t]
+    -> Sequence [t]
+    -> Sequence [t]
+merge actions seqnc =
+        appEndo . getDual . mconcat . fmap (Dual . runAction)
+    <$> actions
+    <*> seqnc
+
 schemaStyle
-    :: Sequence (Action Style)
+    :: Sequence [Action Style]
     -> ElementSchema
     -> ElementSchema
 schemaStyle actions schema = schema {
-      elementSchemaStyle = mergeStyle actions (elementSchemaStyle schema)
+      elementSchemaStyle = merge actions (elementSchemaStyle schema)
     }
-  where
-    mergeStyle
-        :: Sequence (Action Style)
-        -> Sequence [Style]
-        -> Sequence [Style]
-    mergeStyle actions seqnc = runAction <$> actions <*> seqnc
 
 schemaAttributes
-    :: Sequence (Action Attributes)
+    :: Sequence [Action Attributes]
     -> ElementSchema
     -> ElementSchema
 schemaAttributes actions schema = schema {
-      elementSchemaAttributes = mergeAttributes actions (elementSchemaAttributes schema)
+      elementSchemaAttributes = merge actions (elementSchemaAttributes schema)
     }
-  where
-    mergeAttributes
-        :: Sequence (Action Attributes)
-        -> Sequence [Attributes]
-        -> Sequence [Attributes]
-    mergeAttributes actions seqnc = runAction <$> actions <*> seqnc
 
 schemaProperties
-    :: Sequence (Action Properties)
+    :: Sequence [Action Properties]
     -> ElementSchema
     -> ElementSchema
 schemaProperties actions schema = schema {
-      elementSchemaProperties = mergeProperties actions (elementSchemaProperties schema)
+      elementSchemaProperties = merge actions (elementSchemaProperties schema)
     }
-  where
-    mergeProperties
-        :: Sequence (Action Properties)
-        -> Sequence [Properties]
-        -> Sequence [Properties]
-    mergeProperties actions seqnc = runAction <$> actions <*> seqnc
 
 schemaPostprocess
     :: Sequence Postprocess
@@ -865,14 +858,19 @@ runElementSchema eschema document el = do
     reactimateProperties :: Element -> Sequence [Properties] -> MomentIO ()
     reactimateProperties element sequence = do
         currentProperties <- liftIO $ newIORef mempty
+        -- For properties we don't diff, as these are sometimes changed by
+        -- user input.
         let changeProperties :: [Properties] -> IO ()
             changeProperties new = do
                 let props :: M.Map T.Text T.Text
                     props = computeProperties new
                 current <- readIORef currentProperties
-                let (add, remove) = diffProperties current props
-                removeProperties element remove
-                addProperties element add
+                --let (add, remove) = diffProperties current props
+                removeProperties element current
+                addProperties element props
+                --putStrLn $ mconcat ["Properties input ", show new]
+                --putStrLn $ mconcat ["Removing properties ", show remove]
+                --putStrLn $ mconcat ["Adding properties ", show add]
                 writeIORef currentProperties props
         sequenceReactimate (changeProperties <$> sequence)
         return ()
@@ -989,7 +987,13 @@ style
     :: W3CTag tag
     => Sequence (Action Style)
     -> ElementBuilder tag ()
-style s = ElementBuilder $ lift (tell (Dual (Endo (schemaStyle s))))
+style s = ElementBuilder $ lift (tell (Dual (Endo (schemaStyle (fmap pure s)))))
+
+style'
+    :: W3CTag tag
+    => Sequence [Action Style]
+    -> ElementBuilder tag ()
+style' s = ElementBuilder $ lift (tell (Dual (Endo (schemaStyle s))))
 
 styleHover
     :: ( ElementEvent Mouseenter tag
@@ -1009,13 +1013,25 @@ attributes
     :: W3CTag tag
     => Sequence (Action Attributes)
     -> ElementBuilder tag ()
-attributes a = ElementBuilder $ lift (tell (Dual (Endo (schemaAttributes a))))
+attributes a = ElementBuilder $ lift (tell (Dual (Endo (schemaAttributes (fmap pure a)))))
+
+attributes'
+    :: W3CTag tag
+    => Sequence [Action Attributes]
+    -> ElementBuilder tag ()
+attributes' a = ElementBuilder $ lift (tell (Dual (Endo (schemaAttributes a))))
 
 properties
     :: W3CTag tag
     => Sequence (Action Properties)
     -> ElementBuilder tag ()
-properties p = ElementBuilder $ lift (tell (Dual (Endo (schemaProperties p))))
+properties p = ElementBuilder $ lift (tell (Dual (Endo (schemaProperties (fmap pure p)))))
+
+properties'
+    :: W3CTag tag
+    => Sequence [Action Properties]
+    -> ElementBuilder tag ()
+properties' p = ElementBuilder $ lift (tell (Dual (Endo (schemaProperties p))))
 
 postprocess
     :: W3CTag tag

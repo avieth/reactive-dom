@@ -79,11 +79,14 @@ module Reactive.DOM.Node (
     , Action(..)
     , Style
     , style
+    , style'
     , styleHover
     , Properties
     , properties
+    , properties'
     , Attributes
     , attributes
+    , attributes'
     , Postprocess(..)
     , postprocess
 
