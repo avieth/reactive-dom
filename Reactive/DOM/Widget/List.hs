@@ -13,7 +13,9 @@ Portability : non-portable (GHC only)
 
 module Reactive.DOM.Widget.List where
 
+import Data.Semigroup hiding ((<>))
 import Data.Monoid
+import Data.Profunctor
 import Reactive.Sequence
 import Reactive.Banana.Combinators
 import Reactive.Banana.Frameworks
@@ -46,6 +48,19 @@ nodeListWidget = widget $ \(~(seqnc, viewChildren)) -> do
     let setChildren = children firstChildren restChildren
 
     pure (seqncT, setChildren)
+
+-- | Like nodeListWidget but if the UIs give events then we'll switch the
+--   output for you.
+nodeListWidget'
+    :: forall m t .
+       ( Semigroup t )
+    => OpenWidget (Sequence [UI (Event t)]) (Event t)
+nodeListWidget' = (lmap input nodeListWidget) `modifyr` modifier output
+  where
+    input :: Sequence [UI (Event t)] -> Sequence [UI (SemigroupEvent t)]
+    input = (fmap . fmap . fmap) SemigroupEvent
+    output :: forall q tag . q -> Sequence (SemigroupEvent t) -> ElementBuilder tag (Event t)
+    output _ seqnc = sequenceSwitchE (runSemigroupEvent <$> seqnc)
 
 -- | Like nodeListWidget except using a MonotoneList. It can be more efficient:
 --   the monoidal product is computed differentially: whenever the children
