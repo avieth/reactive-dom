@@ -41,10 +41,11 @@ import Reactive.DOM.Internal.Node
 import Reactive.DOM.Children.Single
 
 -- | Description of a user interface flow: taking an s, producing a t, with
---   a side-channel producing an o.
+--   a side-channel producing an o. A note on the side channel: it's a way to
+--   observe data from the widgets within the flow.
 data Flow o s t where
     FlowMoment :: (s -> MomentIO t) -> Flow o s t
-    FlowWidget :: W3CTag tag => Widget tag s (o, Event t) -> Flow o s t
+    FlowWidget :: W3CTag tag => Widget tag s (Maybe o, Event t) -> Flow o s t
     -- | Symbolic composition.
     FlowCompose :: Flow o u t -> Flow o s u -> Flow o s t
     -- | Symbol first, for Arrow.
@@ -83,22 +84,38 @@ pureFlow f = FlowMoment $ pure . f
 impureFlow :: (s -> MomentIO t) -> Flow o s t
 impureFlow = FlowMoment
 
-widgetFlow :: W3CTag tag => (Widget tag s (o, Event t)) -> Flow o s t
+widgetFlow :: W3CTag tag => (Widget tag s (Maybe o, Event t)) -> Flow o s t
 widgetFlow = FlowWidget
 
-widgetFlow' :: W3CTag tag => Widget tag s (Event t) -> Flow o (s, o) t
-widgetFlow' w = FlowWidget $ rmap (\(ev, o) -> (o, ev)) (passthrough w)
+widgetFlow' :: W3CTag tag => Widget tag s (Event t) -> Flow o s t
+widgetFlow' w = FlowWidget $ rmap (\ev -> (Nothing, ev)) w
 
 flowMap :: (o -> o') -> Flow o s t -> Flow o' s t
-flowMap f flow = case flow of
-    FlowCompose l r -> FlowCompose (flowMap f l) (flowMap f r)
-    FlowFirst fst -> FlowFirst (flowMap f fst)
-    FlowLeft left -> FlowLeft (flowMap f left)
+flowMap f = flowTrans (fmap f)
+
+flowTrans :: (Maybe o -> Maybe o') -> Flow o s t -> Flow o' s t
+flowTrans f flow = case flow of
+    FlowCompose l r -> FlowCompose (flowTrans f l) (flowTrans f r)
+    FlowFirst fst -> FlowFirst (flowTrans f fst)
+    FlowLeft left -> FlowLeft (flowTrans f left)
     FlowMoment m -> FlowMoment m
     FlowWidget mk -> FlowWidget (fmap (\(o, ev) -> (f o, ev)) mk)
     FlowApp -> proc (flow, s) -> do
-        FlowApp -< (flowMap f flow, s)
+        FlowApp -< (flowTrans f flow, s)
 
+-- | For flows which terminate in a Widget, alter the event which determines
+--   when that flow ends. Your alteration is in Moment, so you can work with
+--   steppers.
+flowMapE :: (Event t -> Moment (Event t)) -> Flow o s t -> Flow o s t
+flowMapE f flow = case flow of
+    FlowCompose l r -> FlowCompose (flowMapE f l) r
+    FlowFirst first -> FlowFirst first
+    FlowLeft left -> FlowLeft left
+    FlowMoment m -> FlowMoment m
+    FlowWidget w -> FlowWidget $
+        w `modifyr` (modifier $ \_ (o, ev) -> liftMoment (f ev) >>= pure . (,) o)
+    FlowApp -> proc (flow, s) -> do
+        FlowApp -< (flowMapE f flow, s)
 {-
 
 -- TODO this one is really a mess and hard to follow.
@@ -219,7 +236,7 @@ alterFlowUniform fwidget fflow flow =
 -}
 
 newtype FlowContinuation o r = FlowContinuation {
-      runFlowContinuation :: UI (o, Event (MomentIO (Either r (FlowContinuation o r))))
+      runFlowContinuation :: UI (Maybe o, Event (MomentIO (Either r (FlowContinuation o r))))
     }
 
 runFlowGeneral
@@ -251,21 +268,15 @@ runFlowGeneral flow k = case flow of
         let k' = runFlowGeneral left k
         runFlowGeneral right k' s
 
--- TBD Maybe runFlow should just give an Intrinsic part, rather than choosing
--- the "div" tag.
---
--- If we give a Sequence Extrinsic o then it's useless. Must transform it to
--- MomentIO.
--- Perhaps put an m parameter on the Widget and use this to fix the Sequence's
--- m parameter?
+-- | Compile a flow to an OpenWidget.
 runFlow
     :: forall o s .
        Flow o s Void
-    -> OpenWidget s (Sequence o)
+    -> OpenWidget s (Sequence (Maybe o))
 runFlow flow = widget $ \(s, viewChildren) -> do
 
-    let first :: (o, Event (MomentIO (Either Void (FlowContinuation o Void))))
-        rest :: Event (o, Event (MomentIO (Either Void (FlowContinuation o Void))))
+    let first :: (Maybe o, Event (MomentIO (Either Void (FlowContinuation o Void))))
+        rest :: Event (Maybe o, Event (MomentIO (Either Void (FlowContinuation o Void))))
         first = childData . runSingle $ viewChildrenInitial viewChildren
         rest = childData . runSingle <$> (viewChildrenEvent viewChildren)
 
@@ -286,11 +297,11 @@ runFlow flow = widget $ \(s, viewChildren) -> do
         fk = either absurd id x
 
     -- The first child.
-    let uiFirst :: UI (o, Event (MomentIO (Either Void (FlowContinuation o Void))))
+    let uiFirst :: UI (Maybe o, Event (MomentIO (Either Void (FlowContinuation o Void))))
         uiFirst = runFlowContinuation fk
     -- The remaining children, defined via changeEvents and ultimately
     -- derived from the input (first, rest).
-    let uiRest :: Event (UI (o, Event (MomentIO (Either Void (FlowContinuation o Void)))))
+    let uiRest :: Event (UI (Maybe o, Event (MomentIO (Either Void (FlowContinuation o Void)))))
         uiRest = runFlowContinuation <$> changeEvents
 
     -- Using the data from the rendered children, we have the output data
