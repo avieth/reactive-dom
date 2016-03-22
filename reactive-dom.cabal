@@ -33,6 +33,7 @@ library
                      , Reactive.DOM.Widget.Paginator
                      , Reactive.DOM.Widget.Tabular
                      , Reactive.DOM.Widget.OneOf
+                     , Control.Arrow.ReactiveState
 
   other-modules:       Reactive.DOM.Internal.Node
                      , Reactive.DOM.Internal.Tag
@@ -52,7 +53,7 @@ library
   build-depends:       base >=4.8 && <4.9
                      , transformers >=0.4 && <0.5
                      , containers >=0.5 && <0.6
-                     , reactive-banana >=1.0 && <1.1
+                     , reactive-banana >=1.1 && <1.2
                      , semigroups >= 0.18 && < 0.19
                      , array <= 0.6
                      , ghcjs-base

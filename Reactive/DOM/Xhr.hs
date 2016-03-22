@@ -351,17 +351,18 @@ sequenceXhrContinuations (XhrContinuation x) k = case x of
         -- The value event. Either it comes immediately from the next one (next
         -- is not an Xhr, but a pure function) or the next one has to wait for
         -- it too.
+        switched <- switchE ((\(x,_,_) -> x) <$> evNextDelayed)
         let ev :: Banana.Event t
             ev = unionWith const
                            evNextImmediate
-                           (switchE ((\(x,_,_) -> x) <$> evNextDelayed))
+                           switched
         -- The xhrs event: grab the initial Xhrs of the next one, then the
         -- remaining xhrs.
         -- The initial Xhrs are of course prefixed with Spawn.
         let evNextXhrsInitial :: Banana.Event (NonEmpty XhrChange)
             evNextXhrsInitial = ((\(_,x,_) -> Spawn <$> x) <$> evNextDelayed)
-        let evNextXhrsDelayed :: Banana.Event (NonEmpty XhrChange)
-            evNextXhrsDelayed = switchE ((\(_,_,x) -> x) <$> evNextDelayed)
+        evNextXhrsDelayed :: Banana.Event (NonEmpty XhrChange)
+            <- switchE ((\(_,_,x) -> x) <$> evNextDelayed)
         let evXhrs :: Banana.Event (NonEmpty XhrChange)
             evXhrs = unionWith (<>) evNextXhrsDelayed evNextXhrsInitial
         -- Don't forget to include the local xhr changes with the remaining
@@ -483,8 +484,8 @@ xhrMany handler sev = Compose $ mdo
     let delayeds :: Banana.Event (Banana.Event t, NonEmpty Xhr, Banana.Event (NonEmpty XhrChange))
         delayeds = filterJust (either (const Nothing) Just <$> continuations)
 
-    let delayedValues :: Banana.Event t
-        delayedValues = switchE ((\(x,_,_) -> x) <$> delayeds)
+    delayedValues :: Banana.Event t
+        <- switchE ((\(x,_,_) -> x) <$> delayeds)
 
     -- The Xhrs that are spawned immediately (simultaneously with the input
     -- event sev).
@@ -492,8 +493,8 @@ xhrMany handler sev = Compose $ mdo
         firstXhrs = (\(_,x,_) -> x) <$> delayeds
 
     -- The updates to the Xhrs; switched whenever the input event sev fires.
-    let changeXhrs :: Banana.Event (NonEmpty XhrChange)
-        changeXhrs = switchE ((\(_,_,x) -> x) <$> delayeds)
+    changeXhrs :: Banana.Event (NonEmpty XhrChange)
+        <- switchE ((\(_,_,x) -> x) <$> delayeds)
 
     let updateCurrentXhrs :: Banana.Event [Xhr]
         updateCurrentXhrs = unionWith const
@@ -534,11 +535,11 @@ xhrMany handler sev = Compose $ mdo
 --   want to trigger the output event.
 xhrLimited
     :: forall r s t .
-       ( Monoid r )
-    => XhrHandler (r, s) (r, Maybe t)
+       XhrHandler (r, s) (r, Maybe t)
+    -> r
     -> Banana.Event s
     -> Compose MomentIO Banana.Event t
-xhrLimited handler sev = Compose $ mdo
+xhrLimited handler r sev = Compose $ mdo
 
     -- Grab the continuations, from which we shall derive our values.
     continuations :: Banana.Event (Either (r, Maybe t) (Banana.Event (r, Maybe t), NonEmpty Xhr, Banana.Event (NonEmpty XhrChange)))
@@ -550,8 +551,9 @@ xhrLimited handler sev = Compose $ mdo
     let delayeds :: Banana.Event (Banana.Event (r, Maybe t), NonEmpty Xhr, Banana.Event (NonEmpty XhrChange))
         delayeds = filterJust (either (const Nothing) Just <$> continuations)
 
+    switched <- switchE ((\(x,_,_) -> x) <$> delayeds)
     let values :: Banana.Event (r, Maybe t)
-        values = unionWith const immediates (switchE ((\(x,_,_) -> x) <$> delayeds))
+        values = unionWith const immediates switched
 
     -- Create a gate: whenever a value is returned it opens (True) and whenever
     -- a new request is spawned it closes (False).
@@ -567,6 +569,6 @@ xhrLimited handler sev = Compose $ mdo
     queued <- stepper Nothing (Just <$> (whenE (not <$> gate) sev))
 
     mostRecentResponse :: Behavior r
-        <- stepper mempty (fst <$> values)
+        <- stepper r (fst <$> values)
 
     pure (filterJust (snd <$> values))
