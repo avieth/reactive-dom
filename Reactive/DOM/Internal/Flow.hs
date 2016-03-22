@@ -26,6 +26,7 @@ import Control.Applicative
 import Control.Category
 import Control.Arrow
 import Control.Monad.Trans.Class (lift)
+import Control.Arrow.ReactiveState
 import Data.Void
 import Data.Profunctor
 import Data.Bifunctor (bimap)
@@ -77,6 +78,9 @@ instance ArrowChoice (Flow o) where
 instance ArrowApply (Flow o) where
     app = FlowApp
 
+instance ArrowMomentIO (Flow o) where
+    liftArrowMomentIO arrow = arrow >>> FlowMoment id
+
 -- | Make a flow which shows no Widget, just runs a pure function.
 --   pureFlow = arr
 pureFlow :: (s -> t) -> Flow o s t
@@ -112,7 +116,7 @@ flowMapE f flow = case flow of
     FlowLeft left -> FlowLeft left
     FlowMoment m -> FlowMoment m
     FlowWidget w -> FlowWidget $
-        w `modifyr` (modifier $ \_ (o, ev) -> liftMoment (f ev) >>= pure . (,) o)
+        w `modifyr` (modifier $ \(o, ev) -> liftMoment (f ev) >>= pure . (,) o)
     FlowApp -> proc (flow, s) -> do
         FlowApp -< (flowMapE f flow, s)
     FlowOpen closed -> FlowOpen (flowTrans (traverse f) closed)
@@ -124,7 +128,7 @@ flowTrans f flow = case flow of
     FlowLeft left -> FlowLeft (flowTrans f left)
     FlowMoment m -> FlowMoment m
     FlowWidget w -> FlowWidget $
-        w `modifyr` (modifier $ \_ (o, ev) -> liftMoment (f o) >>= pure . flip (,) ev)
+        w `modifyr` (modifier $ \(o, ev) -> liftMoment (f o) >>= pure . flip (,) ev)
     FlowApp -> proc (flow, s) -> do
         FlowApp -< (flowTrans f flow, s)
     FlowOpen closed -> FlowOpen closed

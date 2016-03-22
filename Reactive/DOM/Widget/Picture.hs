@@ -50,14 +50,14 @@ dataUri duri = T.concat [
 
 -- | A static picture.
 picture :: Widget "img" PictureSource ()
-picture = trivialWidget `modifyl` modifier (const setup)
+picture = trivialWidget `modifyl` modifier setup
   where
     setup psource = attributes (always (mkAttributes psource))
     mkAttributes (PictureSourceDataUri duri) = Set (makeAttributes [("src", dataUri duri)])
 
 -- | Like picture, but a div with a background image rather than an img element.
 divPicture :: Widget "div" PictureSource ()
-divPicture = trivialWidget `modifyl` modifier (const setup)
+divPicture = trivialWidget `modifyl` modifier setup
   where
     setup psource = style (always (mkStyle psource))
     mkStyle (PictureSourceDataUri duri) = Set $ makeStyle [

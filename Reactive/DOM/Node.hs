@@ -26,11 +26,11 @@ module Reactive.DOM.Node (
     , UI
     , ui
     , widget
+    , pullthrough
     , trivialWidget
     , emptyWidget
     , openWidget
     , closeWidget
-    , passthrough
     , tieKnot
     , tieKnot'
     , Children

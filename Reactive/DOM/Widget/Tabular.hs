@@ -65,10 +65,10 @@ tabs mkThing = tieKnot (rmap getOutput contents) loop
     withEnumEvent (enum, ClosedWidget tag w) =
         ClosedWidget tag w'
       where
-        w' = modify (modifier (const input)) (modifier (const output)) w
+        w' = modify (modifier input) (modifier output) w
         output ev = pure (SemigroupEvent (fmap (const (First enum)) ev))
         input (s, seqnc) = do
-            initial <- sequenceFirst seqnc
+            let initial = sequenceFirst seqnc
             chngs <- sequenceChanges seqnc
             let pickTrue (old, new) = old /= new && new == enum
             let pickFalse (old, new) = old /= new && old == enum

@@ -18,6 +18,7 @@ Portability : non-portable (GHC only)
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE FlexibleContexts #-}
 
@@ -31,6 +32,7 @@ import Reactive.Banana.Combinators
 import Reactive.Banana.Frameworks
 import Data.Monoid ((<>))
 import Data.Profunctor
+import Unsafe.Coerce
 
 -- | A composite children container representing the conjunction of two
 --   other containers, or in other words the union of the children in both
@@ -58,9 +60,9 @@ instance
     , FunctorTransformer right
     ) => FunctorTransformer (Product left right inp out)
   where
-    functorTrans trans (Product (left, right)) =
+    functorTrans trans ~(Product (left, right)) =
         Product (functorTrans trans left, functorTrans trans right)
-    functorCommute (Product (left, right)) =
+    functorCommute ~(Product (left, right)) =
         Product <$> ((,) <$> functorCommute left <*> functorCommute right)
 
 instance
@@ -79,12 +81,12 @@ instance
   where
     type Change (Product left right inp out) =
         Sum (Change left) (Change right)
-    getChange get (Sum choice) (Product (left, right)) = case choice of
+    getChange get ~(Sum choice) ~(Product (left, right)) = case choice of
         -- For changes to the left summand, we must make every AppendChild
         -- into an InsertBefore on the head of the right children, if there
         -- is a head. This ensures that the children of the left always come
         -- before the children of the right.
-        Left cleft -> let (x, m) = getChange get cleft left
+        Left cleft -> let ~(x, m) = getChange get cleft left
                           makeInsertBefore rightHead mutation = case mutation of
                               AppendChild x -> InsertBefore x rightHead
                               other -> other
@@ -92,8 +94,8 @@ instance
                               [] -> m
                               first : _ -> makeInsertBefore first <$> m
                       in  (Product (x, right), mutations)
-        Right cright -> let (x, m) = getChange get cright right in (Product (left, x), m)
-    childrenContainerList get (Product (left, right)) =
+        Right cright -> let ~(x, m) = getChange get cright right in (Product (left, x), m)
+    childrenContainerList get ~(Product (left, right)) =
         childrenContainerList get left ++ childrenContainerList get right
 
 -- | Combine two widgets in such a way that their children share the same
@@ -112,9 +114,9 @@ widgetProduct (Widget l1 mk1 r1) (Widget l2 mk2 r2) = Widget l mk r
         pure ((pf1, pf2), (r1, r2))
 
     r ~(pf1, pf2) ~(q1, q2) = do
-      ~(pb1, t1) <- r1 pf1 q1
-      ~(pb2, t2) <- r2 pf2 q2
-      pure ((pb1, pb2), (t1, t2))
+      ~(pb1, mkt1) <- r1 pf1 q1
+      ~(pb2, mkt2) <- r2 pf2 q2
+      pure ((pb1, pb2), (,) <$> mkt1 <*> mkt2)
 
     mk = \(~((s1, s2), viewChildren)) -> do
         let transLeft :: forall f left right inp out . Product left right inp out f -> left f
@@ -231,16 +233,41 @@ instance
     childrenContainerList get (SumLeft (TLeft l)) = childrenContainerList get l
     childrenContainerList get (SumRight (TRight r)) = childrenContainerList get r
 
+-- We find that using the profunctor instance against a widget sum is not
+-- exactly... useful. Sure, the right-side part is fine, because the
+-- forall choice is on the left of the arrow. But the left-side is no good!
+-- We have to some how express the existential. Given an s, we can make
+-- TEither choice for *some* choice.
+
+-- Ok, if we have a widgetSumStatic where the output is uniform, we can
+-- collapse that output.
+widgetSumDynamic
+    :: forall s1 s2 t choice .
+       OpenWidget s1 t
+    -> OpenWidget s2 t
+    -> OpenWidget (Either s1 s2) t
+widgetSumDynamic left right = dimap input output (widgetSumStatic left right)
+  where 
+    -- Since it's impossible to come up with a
+    --   forall choice . TEither choice s1 s2
+    -- we have to unsafeCoerce (is there a better way??)
+    input :: forall choice . Either s1 s2 -> TEither choice s1 s2
+    input (Left s) = unsafeCoerce $ TLeft s
+    input (Right s) = unsafeCoerce $ TRight s
+    output :: forall choice . TEither choice t t -> t
+    output (TLeft t) = t
+    output (TRight t) = t
+
 -- | Combine two widgets in such a way that their children share the same
 --   DOM element, but are shown in a mutually-exclusive way. If the input is
 --   Left, only the left OpenWidget's children are shown. Symmetric for the
 --   Right case.
-widgetSum
+widgetSumStatic
     :: forall choice sL sR tL tR .
        OpenWidget sL tL
     -> OpenWidget sR tR
     -> OpenWidget (TEither choice sL sR) (TEither choice tL tR)
-widgetSum (Widget lL mkL rL) (Widget lR mkR rR) =
+widgetSumStatic (Widget lL mkL rL) (Widget lR mkR rR) =
     Widget (l lL lR) (mk mkL mkR) (r rL rR)
 
   where
@@ -271,18 +298,18 @@ widgetSum (Widget lL mkL rL) (Widget lR mkR rR) =
     -- The output function is free to pattern match on both parts of its
     -- input; no laziness constraints here.
     r :: forall tag choice pbL pbR pfL pfR qL qR .
-         (pfL -> qL -> ElementBuilder tag (pbL, tL))
-      -> (pfR -> qR -> ElementBuilder tag (pbR, tR))
+         (pfL -> qL -> ElementBuilder tag (pbL, ElementBuilder tag tL))
+      -> (pfR -> qR -> ElementBuilder tag (pbR, ElementBuilder tag tR))
       -> TEither choice pfL pfR
       -> TEither choice qL qR
-      -> ElementBuilder tag (TEither choice pbL pbR, TEither choice tL tR)
+      -> ElementBuilder tag (TEither choice pbL pbR, ElementBuilder tag (TEither choice tL tR))
     r rL rR pf x = case (pf, x) of
         (TLeft pfL, TLeft qL) -> do
-            ~(pbL, tL) <- rL pfL qL
-            pure (TLeft pbL, TLeft tL)
+            ~(pbL, mktL) <- rL pfL qL
+            pure (TLeft pbL, TLeft <$> mktL)
         (TRight pfR, TRight qR) -> do
-            ~(pbR, tR) <- rR pfR qR
-            pure (TRight pbR, TRight tR)
+            ~(pbR, mktR) <- rR pfR qR
+            pure (TRight pbR, TRight <$> mktR)
 
     -- Step 2: given the left and right intrinsic parts, come up with a
     -- discriminated intrinsic part, which decides which intrinsic part to use

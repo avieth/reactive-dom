@@ -42,11 +42,11 @@ instance FunctorTransformer (NodeList t inp out) where
 
 instance ChildrenContainer (NodeList t inp out) where
     type Change (NodeList t inp out) = NodeList t inp out
-    getChange get (NodeList news) (NodeList olds) =
+    getChange get ~(NodeList news) ~(NodeList olds) =
         let editList = edits (==) (get <$> olds) (get <$> news)
             mutations = runEditList editList
         in  (NodeList news, mutations)
-    childrenContainerList get (NodeList lst) = get <$> lst
+    childrenContainerList get ~(NodeList lst) = get <$> lst
 
 nodeList :: [f t] -> NodeList t inp out f
 nodeList = NodeList

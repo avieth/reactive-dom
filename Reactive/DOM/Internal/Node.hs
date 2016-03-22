@@ -29,6 +29,7 @@ module Reactive.DOM.Internal.Node where
 import Prelude hiding ((.), id, span)
 import GHC.TypeLits (Symbol)
 import Control.Category
+import Control.Arrow
 import Control.Monad
 import Control.Monad.IO.Class
 import Control.Monad.Trans.Class (lift)
@@ -153,7 +154,7 @@ childrenTrans
     -> (forall f . [Change g f] -> [Change h f])
     -> Children g
     -> Children h
-childrenTrans trans transc (Children a b) = Children a' b'
+childrenTrans trans transc ~(Children a b) = Children a' b'
   where
     a' = trans a
     b' = transc <$> b
@@ -173,19 +174,32 @@ viewChildrenTrans
     -> (forall f . [Change g f] -> [Change h f])
     -> ViewChildren g
     -> ViewChildren h
-viewChildrenTrans trans transc (ViewChildren a b c) = ViewChildren a' b' c'
+viewChildrenTrans trans transc ~(ViewChildren a b c) = ViewChildren a' b' c'
   where
     a' = trans a
     b' = transc <$> b
     c' = trans <$> c
 
 -- | Description of a user interface piece.
+--
 --   Inside is a kernel, in which some output type q and children must be
 --   derived from some input type r and the data from those children.
 --   The form of the children may also depend upon the types q and r.
+--
 --   Once this kernel is given, a Widget remains somewhat flexible due to the
 --   other two pieces: monadic input and output arrows formed in such a way
 --   that the input may depend upon the output and vice-versa.
+--
+--   However, sometimes we want the output to force the data available to it.
+--   To make this possible, output is segmented: the passback data, always
+--   made available lazily to the input, is produced alongside another
+--   computation to bring about the final output. When altering the output
+--   via the Profunctor interface or through effectful Modifiers, the output
+--   will go outside of the recursive knot. But when the knot is tied via
+--   tieKnot, it will enter the knot. It's therefore important to be clear about
+--   the strictness of a Widget. If its output function is not lazy enough, then
+--   the Widget must not be used in tieKnot.
+--
 data Widget (tag :: Symbol) s t where
     Widget
         :: ( ChildrenContainer (f r q) )
@@ -194,7 +208,7 @@ data Widget (tag :: Symbol) s t where
         -> (  (r, ViewChildren (f r q))
            -> ElementBuilder tag (q, Children (f r q))
            )
-        -> (passforward -> q -> ElementBuilder tag (passback, t))
+        -> (passforward -> q -> (ElementBuilder tag (passback, ElementBuilder tag t)))
         -- output may depend upon input
         -> Widget tag s t
 
@@ -209,8 +223,9 @@ instance Profunctor (Widget tag) where
     dimap l r (Widget l' mk r') = Widget l'' mk r''
       where
         l'' passback s = l' passback (l s)
-        r'' passforward q = (fmap . fmap) r (r' passforward q)
+        r'' passforward q = (fmap . fmap . fmap) r (r' passforward q)
 
+{-
 -- | Like first for arrows, but since Widget is not an arrow (can't give arr,
 --   and it's also not a category) we make our own.
 passthrough :: Widget tag s t -> Widget tag (s, c) (t, c)
@@ -218,6 +233,17 @@ passthrough (Widget l mk r) = Widget l' mk r'
   where
     l' passback (~(s, c)) = fmap (\(~(pf, r)) -> ((pf, c), r)) (l passback s)
     r' (~(passforward, c)) q = fmap (\(~(pb, t)) -> (pb, (t, c))) (r passforward q)
+-}
+
+pullthrough :: Widget tag s t -> Widget tag s (s, t)
+pullthrough (Widget l mk r) = Widget l' mk r'
+  where
+    l' pb s = do
+        ~(pf, r) <- l pb s
+        pure ((pf, s), r)
+    r' (pf, s) q = do
+        (pb, mkt) <- r pf q
+        pure (pb, (,) s <$> mkt)
 
 -- | Tie a recursive knot: use the output and some new input type to come up
 --   with the original input type. Be sure that the function uses its first
@@ -233,8 +259,11 @@ tieKnot (Widget l mk r) f = Widget l' mk r'
         s <- f t r
         l pb s
     r' pf q = do
-        ~(pb, t) <- r pf q
-        pure ((pb, t), t)
+        (pb, mkt) <- r pf q
+        -- Look! We force the computation made by r. Better make sure it's
+        -- lazy in all the right places.
+        t <- mkt
+        pure ((pb, t), pure t)
 
 -- | A more general knot tyer: use the output and some new input type to define
 --   the old input type and some new output type.
@@ -257,32 +286,12 @@ tieKnot' (Widget l mk r) f = Widget l' mk r'
         ~(s, newT) <- f t newS
         ~(pf, r) <- l pb s
         pure ((pf, newT), r)
-    r' ~(pf, newT) q = do
-        ~(pb, t) <- r pf q
-        pure ((pb, t), newT)
-
-
-{-
--- | Like dimap, but we allow you to MomentIO.
-dimap'
-    :: (q -> ElementBuilder tag s)
-    -> (t -> ElementBuilder tag u)
-    -> Widget tag s t
-    -> Widget tag q u
-dimap' l r (Widget l' mk r') = Widget l'' mk r''
-  where
-    l'' pb s = do s' <- l s
-                  l' pb s'
-    r'' pf q = do ~(pb, t) <- r' pf q
-                  t' <- r t
-                  pure (pb, t')
-
-lmap' :: (q -> ElementBuilder tag s) -> Widget tag s t -> Widget tag q t
-lmap' l = dimap' l pure
-
-rmap' :: (t -> ElementBuilder tag u) -> Widget tag s t -> Widget tag s u
-rmap' r = dimap' pure r
--}
+    r' (pf, newT) q = do
+        (pb, mkt) <- r pf q
+        -- Look again! We force the computation made by r. Better make sure it's
+        -- lazy in all the right places.
+        t <- mkt
+        pure ((pb, t), pure newT)
 
 widget
     :: ( ChildrenContainer (f s t) )
@@ -293,7 +302,7 @@ widget
 widget mk = Widget l mk r
   where
     l pb s = pure ((), s)
-    r pf t = pure ((), t)
+    r pf t = pure ((), pure t)
 
 type OpenWidget s t = forall tag . Widget tag s t
 
@@ -321,48 +330,69 @@ ui = closeWidget Tag
 -- | Whereas the Profunctor interface allows us to use pure functiosn to juggle
 --   the input and output of a Widget, a Modifier does the same but with
 --   ElementBuilder effects.
-newtype Modifier tag input output t = Modifier {
-      runModifier :: input -> output -> ElementBuilder tag t
+newtype Modifier tag s t = Modifier {
+      runModifier :: s -> ElementBuilder tag t
     }
 
-instance Functor (Modifier tag input output) where
-    fmap f = Modifier . (fmap . fmap . fmap) f . runModifier
+instance Functor (Modifier tag s) where
+    fmap f = Modifier . (fmap . fmap) f . runModifier
 
-instance Applicative (Modifier tag input output) where
-    pure = Modifier . pure . pure . pure
-    (Modifier mf) <*> (Modifier mx) = Modifier $ \s t ->
-        ($) <$> mf s t <*> mx s t
+instance Applicative (Modifier tag s) where
+    pure = Modifier . pure . pure
+    (Modifier mf) <*> (Modifier mx) = Modifier $ \s ->
+        ($) <$> mf s <*> mx s
 
-instance Monad (Modifier tag input output) where
+instance Monad (Modifier tag s) where
     return = pure
-    (Modifier mx) >>= k = Modifier $ \s t -> do
-        y <- mx s t
-        runModifier (k y) s t
+    (Modifier mx) >>= k = Modifier $ \s -> do
+        y <- mx s
+        runModifier (k y) s
 
-idModifier :: Modifier tag input output output
-idModifier = modifier $ \_ -> pure
+instance Profunctor (Modifier tag) where
+    dimap l r (Modifier f) = Modifier (fmap r . f . l)
 
-modifier :: (s -> t -> ElementBuilder tag u) -> Modifier tag s t u
+instance Category (Modifier tag) where
+    id = Modifier pure
+    Modifier left . Modifier right = Modifier $ \s -> right s >>= left
+
+instance Arrow (Modifier tag) where
+    arr f = Modifier (pure . f)
+    first (Modifier f) = Modifier $ \(s, c) -> do
+        t <- f s
+        pure (t, c)
+
+instance ArrowChoice (Modifier tag) where
+    left (Modifier f) = Modifier $ \choice -> case choice of
+        Right c -> pure (Right c)
+        Left s -> Left <$> f s
+
+instance ArrowApply (Modifier tag) where
+    app = Modifier $ \(Modifier f, s) -> f s
+
+idModifier :: Modifier tag s s
+idModifier = modifier pure
+
+modifier :: (s -> ElementBuilder tag t) -> Modifier tag s t
 modifier = Modifier
 
 modify
     :: forall tag s t s' t' .
-       Modifier tag t s' s
-    -> Modifier tag s t t'
+       Modifier tag s' s
+    -> Modifier tag t t'
     -> Widget tag s t
     -> Widget tag s' t'
 modify ml mr (Widget l mk r) = Widget l' mk r'
   where
-    -- Modify l so that it passes its unmodified input forward, for use by r.
-    l' ~(pb, t) s' = do
-        s <- runModifier ml t s'
+    -- Modify l so that it passes its unmodified input forwards, for use by r.
+    l' pb s' = do
+        s <- runModifier ml s'
         ~(pf, r) <- l pb s
-        pure ((pf, s), r)
-    -- Modify r so that it passes its unmodified output forward, for use by l.
-    r' ~(pf, s) q = do
-        ~(pb, t) <- r pf q
-        t' <- runModifier mr s t
-        pure ((pb, t), t')
+        pure (pf, r)
+    -- Modify r so that it passes its unmodified output backwards, for use by l.
+    r' pf q = do
+        (pb, mkt) <- r pf q
+        let t' = mkt >>= runModifier mr
+        pure (pb, t')
 
 -- | Like modifyr, but only for an effect.
 --   Since it's just for the effect, we choose a right-modify (modifyr) because
@@ -371,24 +401,29 @@ modify ml mr (Widget l mk r) = Widget l' mk r'
 modify_
     :: forall tag s t .
        Widget tag s t
-    -> Modifier tag s t ()
+    -> Modifier tag t ()
     -> Widget tag s t
-modify_ w m = modifyr w (m *> modifier (const pure))
-
-modifyr
-    :: forall tag s t u .
-       Widget tag s t
-    -> Modifier tag s t u
-    -> Widget tag s u
-modifyr w mr = modify idModifier mr w
+modify_ w m = modifyr w (m *> modifier pure)
 
 modifyl
     :: forall tag s t u .
        Widget tag s t
-    -> Modifier tag t u s
+    -> Modifier tag u s
     -> Widget tag u t
 modifyl w ml = modify ml idModifier w
 
+modifyr
+    :: forall tag s t u .
+       Widget tag s t
+    -> Modifier tag t u
+    -> Widget tag s u
+modifyr w mr = modify idModifier mr w
+
+-- | Use the children output from a widget's intrinsic part to come up with
+--   the input to that same part (a ViewChildren) along with the sequencing
+--   giving DOM mutations required to fulfill that widget's specification.
+--
+--   Strict in both arguments.
 makeChildrenInput
     :: forall f .
        ( ChildrenContainer f
@@ -456,12 +491,20 @@ buildWidget (Widget l mk r) s document = mdo
     -- Notice that the inputter l must be lazy in passback, the intrinsic part
     -- must be lazy in childrenInput, but the outputter need not be lazy in
     -- either argument.
-    let ebuilder = mdo ~(passforward, s') <- l passback s
-                       ~(t', childrenOutput) <- mk (s', childrenInput)
-                       ~(passback, t) <- r passforward t'
-                       ~(childrenInput, mutationSequence)
-                           <- liftMomentIO $ makeChildrenInput document childrenOutput
-                       pure (t, mutationSequence)
+    let ebuilder = do rec { (passforward, s') <- l passback s
+                          ; rec { (t', childrenOutput) <- mk (s', childrenInput)
+                                ; (childrenInput, mutationSequence)
+                                      <- liftMomentIO $ makeChildrenInput document childrenOutput
+                                }
+                          ;  (passback, mt) <- r passforward t'
+                          }
+                      -- This is crucial: the output computation runs outside
+                      -- of the recursive knot above. Without this, it would
+                      -- be impossible *ever* to be non-lazy in the output
+                      -- function with respect to the output of the intrinsic
+                      -- part.
+                      t <- mt
+                      pure (t, mutationSequence)
     ((t, mutationSequence), roelem', eschemaDualEndo)
         <- buildElement ebuilder roelem
     let eschema = appEndo (getDual eschemaDualEndo)
@@ -716,7 +759,7 @@ data Action t = Set t | Unset t | NoOp
 
 runAction :: Eq t => Action t -> Endo [t]
 runAction action = Endo $ case action of
-    Set t -> (:) t
+    Set t -> \ts -> if elem t ts then ts else t : ts
     Unset t -> delete t
     NoOp -> id
 
@@ -748,14 +791,14 @@ type ElementSchemaChild = Either Element Text
 
 -- | Description of a DOM element.
 data ElementSchema = ElementSchema {
-      elementSchemaProperties :: Sequence [Properties]
-    , elementSchemaAttributes :: Sequence [Attributes]
-    , elementSchemaStyle :: Sequence [Style]
+      elementSchemaProperties :: SequenceBuilder [Properties]
+    , elementSchemaAttributes :: SequenceBuilder [Attributes]
+    , elementSchemaStyle :: SequenceBuilder [Style]
     -- Sometimes we need to do some effectful work on a proper DOM element in
     -- order to get what we want. For instance, using external libraries like
     -- Leaflet (map visualizations). We throw in the document for good
     -- measure.
-    , elementSchemaPostprocess :: Sequence Postprocess
+    , elementSchemaPostprocess :: SequenceBuilder Postprocess
     }
 
 newtype Postprocess = Postprocess {
@@ -777,10 +820,10 @@ sequencePostprocess (Postprocess f) (Postprocess g) = Postprocess $ \doc el ->
 --   The choice of NoChildren guarantees that there are no children.
 emptySchema :: ElementSchema
 emptySchema =
-    let props = always []
-        attrs = always []
-        style = always []
-        postProcess = always emptyPostprocess
+    let props = sequenceBuilder (always [])
+        attrs = sequenceBuilder (always [])
+        style = sequenceBuilder (always [])
+        postProcess = sequenceBuilder (always emptyPostprocess)
     in  ElementSchema props
                       attrs
                       style
@@ -789,11 +832,11 @@ emptySchema =
 merge
     :: Eq t
     => Sequence [Action t]
-    -> Sequence [t]
-    -> Sequence [t]
+    -> SequenceBuilder [t]
+    -> SequenceBuilder [t]
 merge actions seqnc =
         appEndo . getDual . mconcat . fmap (Dual . runAction)
-    <$> actions
+    <$> sequenceBuilder actions
     <*> seqnc
 
 schemaStyle
@@ -830,9 +873,11 @@ schemaPostprocess post schema = schema {
   where
     mergePostprocess
         :: Sequence Postprocess
-        -> Sequence Postprocess
-        -> Sequence Postprocess
-    mergePostprocess new existing = (flip sequencePostprocess) <$> new <*> existing
+        -> SequenceBuilder Postprocess
+        -> SequenceBuilder Postprocess
+    mergePostprocess new existing =
+        (flip sequencePostprocess) <$> sequenceBuilder new
+                                   <*> existing
 
 runElementSchema :: ElementSchema -> Document -> Element -> MomentIO ()
 runElementSchema eschema document el = do
@@ -843,10 +888,14 @@ runElementSchema eschema document el = do
     -- style, attributes, properties). But every non-never event which is
     -- used to define these sequences will never be collected! We need some way
     -- to "unreactimate" when the element is collected.
-    reactimateProperties el (elementSchemaProperties eschema)
-    reactimateAttributes el (elementSchemaAttributes eschema)
-    reactimateStyle el (elementSchemaStyle eschema)
-    reactimatePostprocess document el (elementSchemaPostprocess eschema)
+    propsSequence <- buildSequence (elementSchemaProperties eschema)
+    attrsSequence <- buildSequence (elementSchemaAttributes eschema)
+    styleSequence <- buildSequence (elementSchemaStyle eschema)
+    postsSequence <- buildSequence (elementSchemaPostprocess eschema)
+    reactimateProperties el propsSequence
+    reactimateAttributes el attrsSequence
+    reactimateStyle el styleSequence
+    reactimatePostprocess document el postsSequence
     pure ()
 
   where

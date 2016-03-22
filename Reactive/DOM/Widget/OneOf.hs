@@ -34,7 +34,7 @@ oneOf
        )
     => (enum -> ClosedWidget s t)
     -> OpenWidget (s, Sequence enum) t
-oneOf mkThing = contents `modifyl` modifier (const getInput)
+oneOf mkThing = contents `modifyl` modifier getInput
 
   where
 
@@ -49,7 +49,7 @@ oneOf mkThing = contents `modifyl` modifier (const getInput)
            (s, Sequence enum)
         -> ElementBuilder tag (s, enum, Event (enum, enum))
     getInput (s, seqnc) = do
-        initial <- sequenceFirst seqnc
+        let initial = sequenceFirst seqnc
         changes <- sequenceChanges seqnc
         pure (s, initial, changes)
 
@@ -58,7 +58,7 @@ oneOf mkThing = contents `modifyl` modifier (const getInput)
            (enum, ClosedWidget s t)
         -> ClosedWidget (s, enum, Event (enum, enum)) t
     withFocusEvent (enum, ClosedWidget tag w) =
-        ClosedWidget tag (w `modifyl` modifier (const (focus enum)))
+        ClosedWidget tag (w `modifyl` modifier (focus enum))
 
     -- Given an index, and an event indicating which indexes should be hidden
     -- and shown, style a widget to respect the hide/show via the CSS display

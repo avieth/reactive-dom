@@ -26,8 +26,7 @@ import Data.Profunctor
 
 varyingText :: OpenWidget (Sequence T.Text) ()
 varyingText = widget $ \(~(seqnc, _)) -> do
-    initial <- sequenceFirst seqnc
-    rest <- sequenceEvent seqnc
+    let ~(initial, rest) = runSequence seqnc
     pure ((), children (Single (textChild initial)) (pure . Single . textChild <$> rest))
 
 constantText :: OpenWidget T.Text ()
@@ -40,9 +39,9 @@ a :: OpenWidget s t -> Widget "a" s t
 a = id
 
 link :: OpenWidget s t -> Widget "a" (s, T.Text) t
-link w = a (lmap fst w) `modifyr` setHref
+link w = pullthrough (a (lmap fst w)) `modifyr` setHref
   where
-    setHref = modifier $ \(_, href) t -> do
+    setHref = modifier $ \((_, href), t) -> do
         attributes' (always [Set (makeAttributes [("href", href)])])
         pure t
 
@@ -64,26 +63,29 @@ form = id
 hr :: Widget "hr" () ()
 hr = trivialWidget
 
+br :: Widget "br" () ()
+br = trivialWidget
+
 -- | A button which shows text and gives a click event.
 simpleButton :: Widget "button" T.Text (Event ())
-simpleButton = button constantText `modifyr` modifier (const (const (event Click)))
+simpleButton = button constantText `modifyr` modifier (const (event Click))
 
 -- | The text displayed here is not determined by children, but by the value
 --   property, so it can be played with through the Modification interface.
 textInput :: Widget "input" () (Event T.Text)
-textInput = input trivialWidget `modifyr` modifier (const (const (event Input)))
+textInput = input trivialWidget `modifyr` modifier (const (event Input))
 
 textInputVarying :: Widget "input" (Sequence T.Text) (Event T.Text)
-textInputVarying = input (lmap (const ()) trivialWidget) `modifyr` setup
+textInputVarying = pullthrough (input (lmap (const ()) trivialWidget)) `modifyr` setup
   where
-    setup = modifier $ \s t -> setInputValue s t >> event Input
+    setup = modifier $ \(s, t) -> setInputValue s t >> event Input
 
 setInputValue :: Sequence T.Text -> () -> ElementBuilder "input" ()
 setInputValue seqnc _ = do
     -- Each text gets its own Properties, and we're careful to unset the
     -- previous one.
     let uniqueProperties = setValue <$> seqnc
-    initial <- sequenceFirst uniqueProperties
+    let ~(initial, _) = runSequence uniqueProperties
     changes <- sequenceChanges uniqueProperties
     properties' ([Set initial] |> (unsetSet <$> changes))
     liftMomentIO (reactimate (Prelude.print <$> changes))
@@ -98,14 +100,14 @@ setInputValue seqnc _ = do
 passwordInput :: Widget "input" () (Event T.Text)
 passwordInput = textInput `modifyr` modifier setPasswordType
   where
-    setPasswordType _ event = attributes (always (Set attrs)) >> pure event
+    setPasswordType event = attributes (always (Set attrs)) >> pure event
     attrs = makeAttributes [("type", "password")]
 
 passwordInputVarying :: Widget "input" (Sequence T.Text) (Event T.Text)
-passwordInputVarying = input (lmap (const ()) trivialWidget) `modifyr` setup
+passwordInputVarying = pullthrough (input (lmap (const ()) trivialWidget)) `modifyr` setup
   where
     attrs = makeAttributes [("type", "password")]
-    setup = modifier $ \s t -> do
+    setup = modifier $ \(s, t) -> do
         attributes (always (Set attrs))
         setInputValue s t 
         event Input

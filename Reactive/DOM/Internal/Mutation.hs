@@ -87,4 +87,5 @@ runChildrenMutationsIO
     => [ChildrenMutation SomeNode SomeNode]
     -> parent
     -> IO ()
-runChildrenMutationsIO ms parent = traverse (flip runChildrenMutationIO parent) ms >> pure ()
+runChildrenMutationsIO ms parent =
+    traverse (flip runChildrenMutationIO parent) ms >> pure ()

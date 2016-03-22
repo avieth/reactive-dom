@@ -61,7 +61,7 @@ paginator
        ( Monoid t )
     => OpenWidget (Sequence (PaginatorInput t))
                   (Sequence t, Event PaginatorOutput)
-paginator = lmap makeInput (product `modifyr` modifier (const makeOutput))
+paginator = lmap makeInput (product `modifyr` modifier makeOutput)
   where
 
     makePaginatorState :: PaginatorInput t -> PaginatorState
@@ -83,7 +83,7 @@ paginator = lmap makeInput (product `modifyr` modifier (const makeOutput))
                 Incomplete -> nodeList [newChild button]
                 Fetching -> nodeList [newChild loading]
                 Complete -> nodeList []
-        (initialState, evState) <- liftMoment $ runSequence seqnc
+        let (initialState, evState) = runSequence seqnc
         let firstChildren = makeChildren initialState
         let evChildren = pure . makeChildren <$> evState
         pure (click, children firstChildren evChildren)
@@ -120,7 +120,7 @@ paginator = lmap makeInput (product `modifyr` modifier (const makeOutput))
 
     button :: UI (Event ())
     button = let open = lmap (const "Get more") (span constantText)
-                 closed = open `modifyr` modifier (const (const (event Click)))
+                 closed = open `modifyr` modifier (const (event Click))
              in  ui closed
 
     loading :: UI (Event ())

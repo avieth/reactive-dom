@@ -16,12 +16,10 @@ module Reactive.DOM.Flow (
     , impureFlow
     , widgetFlow
     , widgetFlow'
-    , flowTrans
+    , openFlow
     , flowMap
     , flowMapE
-    --, alterFlow
-    --, alterFlowUniform
-    --, alterFlow'
+    , flowTrans
     , runFlow
 
     ) where

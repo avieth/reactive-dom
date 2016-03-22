@@ -27,6 +27,9 @@ class KnownSymbol tag => W3CTag tag where
 instance W3CTag "div" where
     w3cTagName _ = "div"
 
+instance W3CTag "a" where
+    w3cTagName _ = "a"
+
 --type P = Tag "p"
 instance W3CTag "p" where
     w3cTagName _ = "p"
@@ -66,3 +69,5 @@ instance W3CTag "button" where
 instance W3CTag "img" where
     w3cTagName _ = "img"
 
+instance W3CTag "br" where
+    w3cTagName _ = "br"

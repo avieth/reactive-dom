@@ -23,44 +23,51 @@ import Reactive.DOM.Node
 import Reactive.DOM.Children.NodeList
 import Reactive.DOM.Children.MonotoneList
 
--- | Show a list of UIs in the list order, and give back the monoidal
---   concatenation of their values.
+-- | Show a list of UIs in the list order, and give back the list of their
+--   values.
 nodeListWidget
     :: forall m t .
-       ( Monoid t )
-    => OpenWidget (Sequence [UI t]) (Sequence t)
+       OpenWidget (Sequence [UI t]) (Sequence [t])
 nodeListWidget = widget $ \(~(seqnc, viewChildren)) -> do
 
-    ~(initial, rest) <- getSequence seqnc
-
-    -- Values are derived from the viewChildren.
-    let concatOne :: forall inp out . NodeList t inp out Child -> t
-        concatOne = mconcat . fmap childData . runNodeList
-    let firstT :: t
-        firstT = concatOne $ viewChildrenInitial viewChildren
-    let restT :: Event t
-        restT = concatOne <$> viewChildrenEvent viewChildren
-    let seqncT = firstT |> restT
-
     -- Children are derived easily from the input.
+    let ~(initial, rest) = runSequence seqnc
     let firstChildren = nodeList . fmap newChild $ initial
     let restChildren = pure . nodeList . fmap newChild <$> rest
     let setChildren = children firstChildren restChildren
 
+    -- Values are derived from the viewChildren.
+    let concatOne :: forall inp out . NodeList t inp out Child -> [t]
+        concatOne = fmap childData . runNodeList
+    let firstT :: [t]
+        firstT = concatOne $ viewChildrenInitial viewChildren
+    let restT :: Event [t]
+        restT = concatOne <$> viewChildrenEvent viewChildren
+    let seqncT = firstT |> restT
+
     pure (seqncT, setChildren)
 
--- | Like nodeListWidget but if the UIs give events then we'll switch the
---   output for you.
-nodeListWidget'
+-- | Show a list of UIs in the list order, and give back the monoidal
+--   concatenation of their values.
+nodeListWidgetMonoidal
+    :: forall m t .
+       ( Monoid t )
+    => OpenWidget (Sequence [UI t]) (Sequence t)
+nodeListWidgetMonoidal = rmap (fmap mconcat) nodeListWidget
+
+-- | Show in list order a list of UIs which give events, and give back the
+--   monoidal concatenation of their events (union). Of course, the events must
+--   hold values in a semigroup, to deal with simultaneous occurrences.
+nodeListWidgetSemigroup
     :: forall m t .
        ( Semigroup t )
     => OpenWidget (Sequence [UI (Event t)]) (Event t)
-nodeListWidget' = (lmap input nodeListWidget) `modifyr` modifier output
+nodeListWidgetSemigroup = (lmap input nodeListWidgetMonoidal) `modifyr` modifier output
   where
     input :: Sequence [UI (Event t)] -> Sequence [UI (SemigroupEvent t)]
     input = (fmap . fmap . fmap) SemigroupEvent
-    output :: forall q tag . q -> Sequence (SemigroupEvent t) -> ElementBuilder tag (Event t)
-    output _ seqnc = sequenceSwitchE (runSemigroupEvent <$> seqnc)
+    output :: forall tag . Sequence (SemigroupEvent t) -> ElementBuilder tag (Event t)
+    output seqnc = sequenceSwitchE (runSemigroupEvent <$> seqnc)
 
 -- | Like nodeListWidget except using a MonotoneList. It can be more efficient:
 --   the monoidal product is computed differentially: whenever the children
@@ -79,7 +86,7 @@ monotoneListWidget
     => OpenWidget (Sequence [UI t]) (Sequence t)
 monotoneListWidget = widget $ \(~(seqnc, viewChildren)) -> mdo
 
-    ~(initial, changes) <- getSequence seqnc
+    let ~(initial, changes) = runSequence seqnc
 
     -- Use the ViewChildren to come up with the output sequence.
     let concatOne :: forall inp out . MonotoneList t inp out Child -> t
