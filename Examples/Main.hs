@@ -35,7 +35,8 @@ main = runWebGUI $ \webView -> do
     let networkDescription :: MomentIO ()
         networkDescription = do
 
-            (_, calculatorEvent) <- render document body (ui (div calculator))
+            let calc = div calculator `modifyr` (arr (const False) >>> makeDraggable)
+            (_, calculatorEvent) <- render document body (ui calc)
             reactimate (Prelude.print <$> calculatorEvent)
 
             pure ()

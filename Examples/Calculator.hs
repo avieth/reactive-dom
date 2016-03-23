@@ -30,7 +30,7 @@ import Data.Profunctor
 --   their output via rmap', then loop that output back to its input via
 --   tie (we tie the knot).
 calculator :: OpenWidget () (Event (Maybe Double))
-calculator = tieKnot (composite `modifyr` (modifier (const makeOutput))) loop
+calculator = tieKnot (composite `modifyr` (modifier makeOutput)) loop
 
   where
 

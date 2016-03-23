@@ -61,6 +61,8 @@ import qualified GHCJS.DOM.EventM as EventM
 import GHCJS.DOM.EventTargetClosures
 import GHCJS.DOM.CSSStyleDeclaration
 import GHCJS.DOM.HTMLInputElement (getValue)
+import GHCJS.DOM.MouseEvent (getDataTransfer, getClientX, getClientY)
+import GHCJS.DOM.DataTransfer
 import Reactive.Banana.Combinators
 import Reactive.Banana.Frameworks
 import Reactive.Sequence
@@ -547,7 +549,7 @@ data EventBinding (tag :: Symbol) where
     EventBinding
         :: forall e tag .
            ( ElementEvent e tag )
-        => Proxy e
+        => e
         -> Event (EventData e)
         -> EventM Element (DOMEvent e) ()
         -> (EventData e -> IO ())
@@ -559,16 +561,15 @@ runEventBinding
     -> (DOMString, Bool)
     -> EventBinding tag
     -> IO ()
-runEventBinding el (eventName, fireWhenBubbled) (EventBinding (Proxy :: Proxy e) _ eventM fire) = do
-    let action :: EventM Element (DOMEvent e) ()
-        action = do eventM
-                    domEvent :: DOMEvent e <- EventM.event
+runEventBinding el (eventName, fireWhenBubbled) (EventBinding e _ eventM fire) = do
+    let action = do eventM
+                    domEvent <- EventM.event
                     mbubbled <- liftIO $ getJSProperty domEvent "bubbled"
                     let bubbled = case mbubbled of
                             Just "true" -> True
                             _ -> False
                     if (not bubbled) || (bubbled && fireWhenBubbled)
-                    then do d <- liftIO (eventData (Proxy :: Proxy e) (Proxy :: Proxy tag) el domEvent)
+                    then do d <- liftIO (eventData e (Proxy :: Proxy tag) el domEvent)
                             liftIO $ setJSProperty domEvent "bubbled" (Just "true")
                             liftIO $ fire d
                             pure ()
@@ -594,7 +595,7 @@ elementEvent event roelement fireWhenBubbled = case existingBinding of
     Just (EventBinding _ ev _ _) -> pure (unsafeCoerce ev, roelement)
     Nothing -> do
         (ev, fire) <- newEvent
-        let binding = EventBinding (Proxy :: Proxy event) ev eventM fire
+        let binding = EventBinding event ev eventM fire
         let newEvents = M.alter (const (Just binding)) (key, fireWhenBubbled) (getEvents roelement)
         pure (ev, roelement { getEvents = newEvents })
   where
@@ -678,7 +679,7 @@ class
     type EventData event :: *
     type DOMEvent event :: *
     eventName :: Proxy event -> Proxy tag -> EventName Element (DOMEvent event)
-    eventData :: Proxy event -> Proxy tag -> Element -> DOMEvent event -> IO (EventData event)
+    eventData :: event -> Proxy tag -> Element -> DOMEvent event -> IO (EventData event)
     -- In case you need to do special effects in the event handler.
     -- Motivating case: the Submit event *always* prevents the default action.
     -- Without this, the page will reload.
@@ -731,6 +732,59 @@ instance W3CTag tag => ElementEvent Scroll tag where
     type DOMEvent Scroll = DOM.Types.UIEvent
     eventName _ _ = Element.scroll
     eventData _ _ el _ = ScrollData <$> getScrollTop el <*> getScrollLeft el
+
+data Drag = Drag
+data DragData = DragData {
+      dragDataClientX :: Int
+    , dragDataClientY :: Int
+    }
+instance W3CTag tag => ElementEvent Drag tag where
+    type EventData Drag = DragData
+    type DOMEvent Drag = DOM.Types.MouseEvent
+    eventName _ _ = Element.drag
+    eventData _ _ el ev = DragData <$> getClientX ev <*> getClientY ev
+
+data Dragstart = Dragstart Bool
+data DragstartData = DragstartData {
+      dragstartDataClientX :: Int
+    , dragstartDataClientY :: Int
+    }
+instance W3CTag tag => ElementEvent Dragstart tag where
+    type EventData Dragstart = DragstartData
+    type DOMEvent Dragstart = DOM.Types.MouseEvent
+    eventName _ _ = Element.dragStart
+    eventData (Dragstart showDragGhost) _ el ev = do
+        when (not showDragGhost) (disableDragGhost el ev)
+        DragstartData <$> getClientX ev <*> getClientY ev
+      where
+        disableDragGhost el ev = do
+            Just dt <- getDataTransfer ev
+            Just doc <- getOwnerDocument el
+            Just emptyThing <- doc `createElement` (Just ("div" :: T.Text))
+            setDragImage dt (Just emptyThing) 0 0
+
+-- | Make something draggable. The input determines whether to show a drag
+--   ghost (True for yes, False for no).
+makeDraggable :: W3CTag tag => Modifier tag Bool (Event (Int, Int))
+makeDraggable = modifier $ \showDragGhost -> do
+    attributes' (always [Set (makeAttributes [("draggable", "true")])])
+    evDragstart <- event (Dragstart showDragGhost)
+    evDrag <- event Drag
+    let evDragstartCoords = (\d -> (dragstartDataClientX d, dragstartDataClientY d)) <$> evDragstart
+    -- The coordinates of the mouse at the last dragstart.
+    beDragstartCoords :: Behavior (Int, Int)
+        <- stepper (0, 0) evDragstartCoords
+    let evDragCoords = (\d -> (dragDataClientX d, dragDataClientY d)) <$> evDrag
+    let evDelta = filterJust (makeDelta <$> beDragstartCoords <@> evDragCoords)
+    pure evDelta
+  where
+    -- When the user releases the mouse, drag fires and gives 0,0 always.
+    -- Maybe that's a chrome bug?
+    -- This is our perhaps irresponsible way of eliminating that behaviour.
+    makeDelta (x1, y1) (x2, y2) =
+        if x2 == 0 && y2 == 0
+        then Nothing
+        else Just (x2 - x1, y2 - y1)
 
 type Document = DOM.Types.Document
 type Element = DOM.Types.Element
