@@ -33,6 +33,7 @@ import Control.Arrow
 import Control.Monad
 import Control.Monad.IO.Class
 import Control.Monad.Trans.Class (lift)
+import Control.Monad.Trans.Reader
 import Control.Monad.Trans.State hiding (modify)
 import Control.Monad.Trans.Writer
 import Control.Monad.Fix
@@ -55,7 +56,8 @@ import qualified GHCJS.DOM.Types as DOM.Types
 import GHCJS.DOM.Element hiding (Element, getStyle, getAttributes)
 import qualified GHCJS.DOM.Element as Element
 import GHCJS.DOM.Node as Node
-import GHCJS.DOM.Document hiding (Document)
+import qualified GHCJS.DOM.Window as Window
+import GHCJS.DOM.Document as Document hiding (Document)
 import GHCJS.DOM.EventM hiding (event)
 import qualified GHCJS.DOM.EventM as EventM
 import GHCJS.DOM.EventTargetClosures
@@ -63,6 +65,13 @@ import GHCJS.DOM.CSSStyleDeclaration
 import GHCJS.DOM.HTMLInputElement (getValue)
 import GHCJS.DOM.MouseEvent (getDataTransfer, getClientX, getClientY)
 import GHCJS.DOM.DataTransfer
+import GHCJS.DOM.TouchEvent (getChangedTouches)
+import GHCJS.DOM.Touch (Touch)
+import qualified GHCJS.DOM.Touch as Touch
+import GHCJS.DOM.TouchList (TouchList)
+import qualified GHCJS.DOM.TouchList as TouchList
+import Data.Maybe (mapMaybe)
+import qualified Data.HashMap.Strict as HM
 import Reactive.Banana.Combinators
 import Reactive.Banana.Frameworks
 import Reactive.Sequence
@@ -72,13 +81,47 @@ import Reactive.DOM.Internal.ChildrenContainer
 import System.IO.Unsafe
 import Unsafe.Coerce
 
+-- | Some UI-global data.
+data UIEnvironment = UIEnvironment {
+      uiEnvironmentWindowMousemove :: Event (Int, Int)
+    , uiEnvironmentWindowMouseup :: Event (Int, Int)
+    }
+
+makeUIEnvironment :: Window -> MomentIO UIEnvironment
+makeUIEnvironment window = do
+    mousemove <- windowMousemove window
+    mouseup <- windowMouseup window
+    pure (UIEnvironment mousemove mouseup)
+  where
+    windowMousemove :: Window -> MomentIO (Event (Int, Int))
+    windowMousemove window = do
+        (ev, fire) <- newEvent
+        unbind <- liftIO $ on window Window.mouseMove $ do
+            e <- EventM.event
+            x <- liftIO $ getClientX e
+            y <- liftIO $ getClientY e
+            liftIO $ fire (x, y)
+            pure ()
+        pure ev
+    windowMouseup :: Window -> MomentIO (Event (Int, Int))
+    windowMouseup window = do
+        (ev, fire) <- newEvent
+        unbind <- liftIO $ on window Window.mouseUp $ do
+            e <- EventM.event
+            x <- liftIO $ getClientX e
+            y <- liftIO $ getClientY e
+            liftIO $ fire (x, y)
+            pure ()
+        pure ev
+
 -- | A monad in which DOM elements are described. It's parameterized by a
 --   Symbol which presumably is one of the W3C standard tag names.
 newtype ElementBuilder (tag :: Symbol) t = ElementBuilder {
       runElementBuilder
-          :: StateT (ReadOnlyElement tag)
+          :: ReaderT UIEnvironment
+             (StateT (ReadOnlyElement tag)
              (WriterT (Dual (Endo ElementSchema))
-             MomentIO)
+             MomentIO))
              t
     }
 
@@ -87,22 +130,23 @@ deriving instance Applicative (ElementBuilder tag)
 deriving instance Monad (ElementBuilder tag)
 deriving instance MonadFix (ElementBuilder tag)
 instance MonadMoment (ElementBuilder tag) where
-    liftMoment = ElementBuilder . lift . lift . liftMoment
+    liftMoment = ElementBuilder . lift . lift . lift . liftMoment
 
 -- | Run an ElementBuilder.
 buildElement
     :: forall tag t .
        ( )
     => ElementBuilder tag t
+    -> UIEnvironment
     -> ReadOnlyElement tag
     -> MomentIO (t, ReadOnlyElement tag, Dual (Endo ElementSchema))
-buildElement extrinsic el = do
+buildElement extrinsic env el = do
     ((t, el'), eschemaDualEndo)
-        <- runWriterT (runStateT (runElementBuilder extrinsic) el)
+        <- runWriterT (runStateT (runReaderT (runElementBuilder extrinsic) env) el)
     pure (t, el', eschemaDualEndo)
 
 liftMomentIO :: MomentIO t -> ElementBuilder tag t
-liftMomentIO = ElementBuilder . lift . lift
+liftMomentIO = ElementBuilder . lift . lift . lift
 
 newtype Child t = Child {
       runChild :: (t, SomeNode)
@@ -127,8 +171,8 @@ existingChild = SetWidgetChild . Left
 textChild :: T.Text -> SetChild ()
 textChild = SetTextChild
 
-runSetChild :: SetChild r -> Document -> Compose MomentIO Child r
-runSetChild child document = Compose $ case child of
+runSetChild :: SetChild r -> UIEnvironment -> Document -> Compose MomentIO Child r
+runSetChild child env document = Compose $ case child of
     SetTextChild txt -> do
         textNode <- makeText document txt
         node <- liftIO $ someText textNode
@@ -136,7 +180,7 @@ runSetChild child document = Compose $ case child of
     SetWidgetChild (Left existing) ->
         pure (Child (runChild existing))
     SetWidgetChild (Right ui) -> do
-        (t, el) <- buildUI ui document
+        (t, el) <- buildUI ui env document
         node <- liftIO $ someElement el
         pure (Child (t, node))
 
@@ -169,7 +213,7 @@ data ViewChildren f = ViewChildren {
 
 viewChildrenBehavior :: ViewChildren f -> ElementBuilder tag (Behavior (f Child))
 viewChildrenBehavior viewChildren = ElementBuilder $
-    (lift . lift) (stepper (viewChildrenInitial viewChildren) (viewChildrenEvent viewChildren))
+    (lift . lift . lift) (stepper (viewChildrenInitial viewChildren) (viewChildrenEvent viewChildren))
 
 viewChildrenTrans
     :: (forall f . g f -> h f)
@@ -226,16 +270,6 @@ instance Profunctor (Widget tag) where
       where
         l'' passback s = l' passback (l s)
         r'' passforward q = (fmap . fmap . fmap) r (r' passforward q)
-
-{-
--- | Like first for arrows, but since Widget is not an arrow (can't give arr,
---   and it's also not a category) we make our own.
-passthrough :: Widget tag s t -> Widget tag (s, c) (t, c)
-passthrough (Widget l mk r) = Widget l' mk r'
-  where
-    l' passback (~(s, c)) = fmap (\(~(pf, r)) -> ((pf, c), r)) (l passback s)
-    r' (~(passforward, c)) q = fmap (\(~(pb, t)) -> (pb, (t, c))) (r passforward q)
--}
 
 pullthrough :: Widget tag s t -> Widget tag s (s, t)
 pullthrough (Widget l mk r) = Widget l' mk r'
@@ -430,15 +464,16 @@ makeChildrenInput
     :: forall f .
        ( ChildrenContainer f
        )
-    => Document
+    => UIEnvironment
+    -> Document
     -> Children f
     -> MomentIO ( ViewChildren f
                 , Sequence [ChildrenMutation SomeNode SomeNode]
                 )
-makeChildrenInput document childrenOutput = mdo
+makeChildrenInput env document childrenOutput = mdo
 
     firstChildren :: f Child
-        <- functorCommute . functorTrans (flip runSetChild document) $ childrenInitial childrenOutput
+        <- functorCommute . functorTrans (\x -> runSetChild x env document) $ childrenInitial childrenOutput
 
     -- childrenChanges childrenOutput :: Event [Change f SetChild]
     -- flip runSetChild document :: SetChild t -> Compose MomentIO SetChild t
@@ -449,7 +484,7 @@ makeChildrenInput document childrenOutput = mdo
     -- traverse (functorCommute . (functorTrans (flip runSetChild document)))
     --     :: [Change f SetChild -> MomentIO [Change f Child]
     sequencedChanges :: Event [Change f Child]
-        <- execute (traverse (functorCommute . (functorTrans (flip runSetChild document))) <$> childrenChanges childrenOutput)
+        <- execute (traverse (functorCommute . (functorTrans (\x -> runSetChild x env document))) <$> childrenChanges childrenOutput)
 
     let restChildren :: Event (f Child, [ChildrenMutation SomeNode SomeNode])
         restChildren =
@@ -480,9 +515,10 @@ buildWidget
        ( W3CTag tag )
     => Widget tag s t
     -> s
+    -> UIEnvironment
     -> Document
     -> MomentIO (t, Element)
-buildWidget (Widget l mk r) s document = mdo
+buildWidget (Widget l mk r) s env document = mdo
     Just el <- document `createElement` Just (w3cTagName (Tag :: Tag tag))
     let roelem = ReadOnlyElement el M.empty
     -- Make a composite ElementBuilder from 3 principal parts of the widget:
@@ -496,7 +532,7 @@ buildWidget (Widget l mk r) s document = mdo
     let ebuilder = do rec { (passforward, s') <- l passback s
                           ; rec { (t', childrenOutput) <- mk (s', childrenInput)
                                 ; (childrenInput, mutationSequence)
-                                      <- liftMomentIO $ makeChildrenInput document childrenOutput
+                                      <- liftMomentIO $ makeChildrenInput env document childrenOutput
                                 }
                           ;  (passback, mt) <- r passforward t'
                           }
@@ -508,7 +544,7 @@ buildWidget (Widget l mk r) s document = mdo
                       t <- mt
                       pure (t, mutationSequence)
     ((t, mutationSequence), roelem', eschemaDualEndo)
-        <- buildElement ebuilder roelem
+        <- buildElement ebuilder env roelem
     let eschema = appEndo (getDual eschemaDualEndo)
                 $ emptySchema
     _ <- reactimateChildren el mutationSequence
@@ -516,7 +552,7 @@ buildWidget (Widget l mk r) s document = mdo
     liftIO (wireEvents roelem')
     pure (t, el)
 
-buildUI :: UI t -> Document -> MomentIO (t, Element)
+buildUI :: UI t -> UIEnvironment -> Document -> MomentIO (t, Element)
 buildUI (ClosedWidget _ widget) = buildWidget widget ()
 
 reactimateChildren
@@ -526,6 +562,8 @@ reactimateChildren
 reactimateChildren parent seqnc = do
     sequenceCommute (liftIO . flip runChildrenMutationsIO parent <$> seqnc)
 
+-- | Renders a UI to a document under a given parent.
+--   
 render
     :: ( IsNode parent
        )
@@ -534,7 +572,9 @@ render
     -> UI t
     -> MomentIO (RenderedNode, t)
 render document parent ui = do
-    (t, el) <- buildUI ui document
+    Just window <- getDefaultView document
+    env <- makeUIEnvironment window
+    (t, el) <- buildUI ui env document
     rendered <- renderElement parent el
     pure (rendered, t)
 
@@ -551,7 +591,7 @@ data EventBinding (tag :: Symbol) where
            ( ElementEvent e tag )
         => e
         -> Event (EventData e)
-        -> EventM Element (DOMEvent e) ()
+        -> EventM (ElementEventTarget e) (DOMEvent e) Bool
         -> (EventData e -> IO ())
         -> EventBinding tag
 
@@ -562,19 +602,17 @@ runEventBinding
     -> EventBinding tag
     -> IO ()
 runEventBinding el (eventName, fireWhenBubbled) (EventBinding e _ eventM fire) = do
-    let action = do eventM
-                    domEvent <- EventM.event
-                    mbubbled <- liftIO $ getJSProperty domEvent "bubbled"
-                    let bubbled = case mbubbled of
-                            Just "true" -> True
-                            _ -> False
-                    if (not bubbled) || (bubbled && fireWhenBubbled)
-                    then do d <- liftIO (eventData e (Proxy :: Proxy tag) el domEvent)
-                            liftIO $ setJSProperty domEvent "bubbled" (Just "true")
-                            liftIO $ fire d
-                            pure ()
-                    else pure ()
-    on el (EventName eventName) action
+    target <- elementEventTarget e (Proxy :: Proxy tag) el
+    let action = do continue <- eventM
+                    if not continue
+                    then pure ()
+                    else do
+                        domEvent <- EventM.event
+                        d <- liftIO (eventData e (Proxy :: Proxy tag) target domEvent)
+                        liftIO $ setJSProperty domEvent "bubbled" (Just "true")
+                        liftIO $ fire d
+                        pure ()
+    on target (EventName eventName) action
     pure ()
 
 wireEvents :: ReadOnlyElement tag -> IO ()
@@ -601,7 +639,7 @@ elementEvent event roelement fireWhenBubbled = case existingBinding of
   where
     existingBinding = M.lookup (key, fireWhenBubbled) (getEvents roelement)
     EventName key = eventName (Proxy :: Proxy event) (Proxy :: Proxy tag)
-    eventM :: EventM Element (DOMEvent event) ()
+    eventM :: EventM Element (DOMEvent event) Bool
     eventM = specialHandler (Proxy :: Proxy event) (Proxy :: Proxy tag)
 
 -- | Since we don't want to allow `execute` in ElementBuilder, we offer a
@@ -618,11 +656,11 @@ deriving instance Monad IOEvent
 ioEvent :: IOEvent (s -> t) -> Event s -> ElementBuilder tag (Event t)
 ioEvent ioevent ev = ElementBuilder $ do
     let io = runIOEvent ioevent
-    lift . lift $ (execute (liftIO . (<*>) io . pure <$> ev))
+    lift . lift .lift $ (execute (liftIO . (<*>) io . pure <$> ev))
 
 clientRect :: ElementBuilder tag (IOEvent ClientRect)
 clientRect = ElementBuilder $ do
-    roelem <- get
+    roelem <- lift get
     let el = getReadOnlyElement roelem
     let getIt = do Just rect <- getBoundingClientRect el
                    pure rect
@@ -630,32 +668,32 @@ clientRect = ElementBuilder $ do
 
 clientHeight :: ElementBuilder tag (IOEvent Double)
 clientHeight = ElementBuilder $ do
-    el <- get
+    el <- lift get
     pure (IOEvent (getClientHeight (getReadOnlyElement el)))
 
 clientWidth :: ElementBuilder tag (IOEvent Double)
 clientWidth = ElementBuilder $ do
-    el <- get
+    el <- lift get
     pure (IOEvent (getClientWidth (getReadOnlyElement el)))
 
 offsetHeight :: ElementBuilder tag (IOEvent Double)
 offsetHeight = ElementBuilder $ do
-    el <- get
+    el <- lift get
     pure (IOEvent (getOffsetHeight (getReadOnlyElement el)))
 
 offsetWidth :: ElementBuilder tag (IOEvent Double)
 offsetWidth = ElementBuilder $ do
-    el <- get
+    el <- lift get
     pure (IOEvent (getOffsetWidth (getReadOnlyElement el)))
 
 scrollHeight :: ElementBuilder tag (IOEvent Int)
 scrollHeight = ElementBuilder $ do
-    el <- get
+    el <- lift get
     pure (IOEvent (getScrollHeight (getReadOnlyElement el)))
 
 scrollWidth :: ElementBuilder tag (IOEvent Int)
 scrollWidth = ElementBuilder $ do
-    el <- get
+    el <- lift get
     pure (IOEvent (getScrollWidth (getReadOnlyElement el)))
 
 -- TODO HasEvent tag event
@@ -665,26 +703,44 @@ event
     => event
     -> ElementBuilder tag (Event (EventData event))
 event ev = ElementBuilder $ do
-    roelem <- get
-    (ev, roelem') <- (lift . lift) (elementEvent ev roelem False)
-    put roelem'
+    roelem <- lift get
+    (ev, roelem') <- (lift . lift . lift) (elementEvent ev roelem False)
+    lift (put roelem')
     pure ev
 
 class
     ( PToJSVal (DOMEvent event)
     , IsEvent (DOMEvent event)
+    , IsEventTarget (ElementEventTarget event)
     , W3CTag tag
     ) => ElementEvent event (tag :: Symbol)
   where
     type EventData event :: *
     type DOMEvent event :: *
-    eventName :: Proxy event -> Proxy tag -> EventName Element (DOMEvent event)
-    eventData :: event -> Proxy tag -> Element -> DOMEvent event -> IO (EventData event)
+    type ElementEventTarget event :: *
+    type ElementEventTarget event = Element
+    eventName :: Proxy event -> Proxy tag -> EventName (ElementEventTarget event) (DOMEvent event)
+    eventData :: event -> Proxy tag -> ElementEventTarget event -> DOMEvent event -> IO (EventData event)
     -- In case you need to do special effects in the event handler.
     -- Motivating case: the Submit event *always* prevents the default action.
     -- Without this, the page will reload.
-    specialHandler :: Proxy event -> Proxy tag -> EventM Element (DOMEvent event) ()
-    specialHandler _ _ = pure ()
+    specialHandler :: Proxy event -> Proxy tag -> EventM (ElementEventTarget event) (DOMEvent event) Bool
+    -- Default special handler: do nothing (return False) if the event is bubbled.
+    specialHandler e tag = not <$> isBubbled e tag
+    -- The EventTarget for this event must be resolvable from an actual Element.
+    -- Motivating case: drag events actually bind dragover on the document.
+    -- Thus the event target is a document, and we get that target using
+    -- Element.ownerDocument
+    elementEventTarget :: event -> Proxy tag -> Element -> IO (ElementEventTarget event)
+
+isBubbled :: ElementEvent e tag => Proxy e -> Proxy tag -> EventM e (DOMEvent e) Bool
+isBubbled _ _ = do
+    domEvent <- EventM.event
+    -- The "bubbled" property is set in runEventBinding.
+    mbubbled <- liftIO $ getJSProperty domEvent "bubbled"
+    pure $ case mbubbled of
+        Just "true" -> True
+        _ -> False
 
 data Click = Click
 instance W3CTag tag => ElementEvent Click tag where
@@ -692,6 +748,19 @@ instance W3CTag tag => ElementEvent Click tag where
     type DOMEvent Click = MouseEvent
     eventName _ _ = Element.click
     eventData _ _ _ _ = pure ()
+    elementEventTarget _ _ = pure
+
+data Mousedown = Mousedown
+data MousedownData = MousedownData {
+      mousedownX :: Int
+    , mousedownY :: Int
+    }
+instance W3CTag tag => ElementEvent Mousedown tag where
+    type EventData Mousedown = MousedownData
+    type DOMEvent Mousedown = MouseEvent
+    eventName _ _ = Element.mouseDown
+    eventData _ _ _ ev = MousedownData <$> getClientX ev <*> getClientY ev
+    elementEventTarget _ _ = pure
 
 data Mouseenter = Mouseenter
 instance W3CTag tag => ElementEvent Mouseenter tag where
@@ -699,6 +768,7 @@ instance W3CTag tag => ElementEvent Mouseenter tag where
     type DOMEvent Mouseenter = MouseEvent
     eventName _ _ = Element.mouseEnter
     eventData _ _ _ _ = pure ()
+    elementEventTarget _ _ = pure
 
 data Mouseleave = Mouseleave
 instance W3CTag tag => ElementEvent Mouseleave tag where
@@ -706,6 +776,7 @@ instance W3CTag tag => ElementEvent Mouseleave tag where
     type DOMEvent Mouseleave = MouseEvent
     eventName _ _ = Element.mouseLeave
     eventData _ _ _ _ = pure ()
+    elementEventTarget _ _ = pure
 
 data Submit = Submit
 instance ElementEvent Submit "form" where
@@ -713,7 +784,8 @@ instance ElementEvent Submit "form" where
     type DOMEvent Submit = DOM.Types.Event
     eventName _ _ = Element.submit
     eventData _ _ _ _ = pure ()
-    specialHandler _ _ = preventDefault
+    elementEventTarget _ _ = pure
+    specialHandler e t = preventDefault >> (not <$> isBubbled e t)
 
 data Input = Input
 instance ElementEvent Input "input" where
@@ -721,6 +793,7 @@ instance ElementEvent Input "input" where
     type DOMEvent Input = DOM.Types.Event
     eventName _ _ = Element.input
     eventData _ _ el _ = maybe "" id <$> getValue (castToHTMLInputElement el)
+    elementEventTarget _ _ = pure
 
 data Scroll = Scroll
 data ScrollData = ScrollData {
@@ -732,59 +805,209 @@ instance W3CTag tag => ElementEvent Scroll tag where
     type DOMEvent Scroll = DOM.Types.UIEvent
     eventName _ _ = Element.scroll
     eventData _ _ el _ = ScrollData <$> getScrollTop el <*> getScrollLeft el
+    elementEventTarget _ _ = pure
 
-data Drag = Drag
-data DragData = DragData {
+{-
+data Pull = Pull
+data PullData = PullData {
       dragDataClientX :: Int
     , dragDataClientY :: Int
     }
 instance W3CTag tag => ElementEvent Drag tag where
     type EventData Drag = DragData
     type DOMEvent Drag = DOM.Types.MouseEvent
-    eventName _ _ = Element.drag
-    eventData _ _ el ev = DragData <$> getClientX ev <*> getClientY ev
+    type ElementEventTarget Drag = Document
+    eventName _ _ = Document.dragOver
+    eventData _ _ el ev = do
+        x <- getClientX ev
+        y <- getClientY ev
+        putStrLn (show x ++ " : " ++ show y)
+        pure (DragData x y)
+        --DragData <$> getClientX ev <*> getClientY ev
+    elementEventTarget _ _ el = do
+        putStrLn "Drag event binding 1"
+        Just doc <- getOwnerDocument el
+        putStrLn "Drag event binding 2"
+        pure doc
+    -- Always fire, even if the event is bubbled.
+    specialHandler _ _ = pure True
 
-data Dragstart = Dragstart Bool
-data DragstartData = DragstartData {
+data DragStart = DragStart Bool
+data DragStartData = DragStartData {
       dragstartDataClientX :: Int
     , dragstartDataClientY :: Int
     }
-instance W3CTag tag => ElementEvent Dragstart tag where
-    type EventData Dragstart = DragstartData
-    type DOMEvent Dragstart = DOM.Types.MouseEvent
+instance W3CTag tag => ElementEvent DragStart tag where
+    type EventData DragStart = DragStartData
+    type DOMEvent DragStart = DOM.Types.MouseEvent
     eventName _ _ = Element.dragStart
-    eventData (Dragstart showDragGhost) _ el ev = do
+    eventData (DragStart showDragGhost) _ el ev = do
+        firefoxCompatibility ev
         when (not showDragGhost) (disableDragGhost el ev)
-        DragstartData <$> getClientX ev <*> getClientY ev
+        DragStartData <$> getClientX ev <*> getClientY ev
       where
+        -- Firefox won't start a drag unless you set some data.
+        -- Firefox also won't report mouse position on drag events, which is
+        -- why we must bind on the document dragover in order to retrieve them.
+        --
+        -- NB I cannot figure out how to make firefox stop showing an ugly
+        -- "helpful" drag and drop visualization. Sure, we get rid of the drag
+        -- ghost, but it'll still show a file icon or some other crap next to
+        -- your cursor. Only way around this I can think of is to roll out our
+        -- own drag and drop via mousemove bindings on the window.
+        -- 
+        -- And indeed this is what we must do. Let's make the pull API like
+        -- we have in JS widgets.
+        --
+        --   pull :: ElementBuilder tag (Event (Event (Int, Int)))
+        --
+        -- That'll be great. We shall require
+        --
+        --   1. an event binding on the window.
+        --   2. an event binding on the element's mousedown.
+        --   3. an event binding on the window's mouseup.
+        --
+        -- Right, use 2 and 3 to make a gate: True between mousedown and
+        -- mouseup (stepper False (unionWith const mouseup mousedown)).
+        -- Put the window's mousemove event behind that gate.
+        -- OK No problem. Let me just verify that firefox will actually support
+        -- this. Indeed it does, to my great surprise.
+        firefoxCompatibility ev = do
+            Just dt <- getDataTransfer ev
+            setData dt ("text/plain" :: T.Text) ("" :: T.Text)
         disableDragGhost el ev = do
             Just dt <- getDataTransfer ev
             Just doc <- getOwnerDocument el
             Just emptyThing <- doc `createElement` (Just ("div" :: T.Text))
             setDragImage dt (Just emptyThing) 0 0
+            setEffectAllowed dt ("none" :: T.Text)
+            pure ()
+    specialHandler e tag = not <$> isBubbled e tag
+    elementEventTarget _ _ = pure
+-}
 
--- | Make something draggable. The input determines whether to show a drag
---   ghost (True for yes, False for no).
-makeDraggable :: W3CTag tag => Modifier tag Bool (Event (Int, Int))
-makeDraggable = modifier $ \showDragGhost -> do
-    attributes' (always [Set (makeAttributes [("draggable", "true")])])
-    evDragstart <- event (Dragstart showDragGhost)
-    evDrag <- event Drag
-    let evDragstartCoords = (\d -> (dragstartDataClientX d, dragstartDataClientY d)) <$> evDragstart
-    -- The coordinates of the mouse at the last dragstart.
-    beDragstartCoords :: Behavior (Int, Int)
-        <- stepper (0, 0) evDragstartCoords
-    let evDragCoords = (\d -> (dragDataClientX d, dragDataClientY d)) <$> evDrag
-    let evDelta = filterJust (makeDelta <$> beDragstartCoords <@> evDragCoords)
-    pure evDelta
+data TouchStart = TouchStart
+data TouchStartData = TouchStartData {
+      touchStartChangedTouches :: HM.HashMap Int (Int, Int)
+    }
+instance W3CTag tag => ElementEvent TouchStart tag where
+    type EventData TouchStart = TouchStartData
+    type DOMEvent TouchStart = DOM.Types.TouchEvent
+    eventName _ _ = Element.touchStart
+    eventData TouchStart _ _ ev = do
+        Just cts <- getChangedTouches ev
+        hm <- elimTouchList cts
+        pure (TouchStartData hm)
+    elementEventTarget _ _ = pure
+
+data TouchMove = TouchMove
+data TouchMoveData = TouchMoveData {
+      touchMoveChangedTouches :: HM.HashMap Int (Int, Int)
+    }
+instance W3CTag tag => ElementEvent TouchMove tag where
+    type EventData TouchMove = TouchMoveData
+    type DOMEvent TouchMove = DOM.Types.TouchEvent
+    eventName _ _ = Element.touchMove
+    eventData TouchMove _ _ ev = do
+        Just cts <- getChangedTouches ev
+        hm <- elimTouchList cts
+        pure (TouchMoveData hm)
+    -- TODO should be optional, no?
+    specialHandler e t = preventDefault >> (not <$> isBubbled e t)
+    elementEventTarget _ _ = pure
+
+-- | Make a hashmap giving client x/y coordinates of each touch, eliminating
+--   the TouchList (and its IO-only interface).
+elimTouchList :: TouchList -> IO (HM.HashMap Int (Int, Int))
+elimTouchList tl = do
+    len <- TouchList.getLength tl
+    assocs <- forM [0..len] $ \i -> do
+        mtouch <- TouchList.item tl i
+        case mtouch of
+            Nothing -> pure Nothing
+            Just touch -> do
+                x <- Touch.getClientX touch
+                y <- Touch.getClientY touch
+                pure (Just (fromIntegral i, (x, y)))
+    pure (HM.fromList (mapMaybe id assocs))
+
+-- | Make something pullable using mouse or touch
+--   The event you get fires whenever a user starts to pull on something.
+--   It gives an event which fires whenever a pull happens and it contains the
+--   deltas of that drag (incremental; change since the last time it fired).
+--   From this the deltas of the entire drag can be derived.
+--   Touch events used only when there's precisely one touch.
+touchPull :: W3CTag tag => Modifier tag () (Event (Event (Int, Int)))
+touchPull = modifier $ \_ -> do
+
+    -- Set up the mouse-based pull event.
+    -- We use the window's mousemove event to give the mouse position, the
+    -- window's mouseup event to determine when it's finished (works even if
+    -- the mouse leaves the browser window), and of course the element's
+    -- mousedown event to determine when to start the pull.
+    evMousedown <- event Mousedown
+    let evPullStartCoords = (\x -> (mousedownX x, mousedownY x)) <$> evMousedown
+    env <- ElementBuilder ask
+    let wmm = uiEnvironmentWindowMousemove env
+    let wmu = uiEnvironmentWindowMouseup env
+    -- Must know when to actually fire the pull events: only between element
+    -- mousedown and window mouseup.
+    let openGate = const True <$> evMousedown
+    let closeGate = const False <$> wmu
+    gate :: Behavior Bool
+        <- stepper False (unionWith const openGate closeGate)
+    let evPullCoords :: Event (Int, Int)
+        evPullCoords = whenE gate wmm
+
+    -- Set up the touch-based pull event. Easy compared to the mouse-based one,
+    -- because W3C gives a somewhat reasonable element-centric way to do this.
+    evTouchStart <- event TouchStart
+    evTouchMove <- event TouchMove
+    let evTouchStartCoords = filterJust (pickSingleTouchStart <$> evTouchStart)
+    let evTouchMoveCoords = filterJust (pickSingleTouchMove <$> evTouchMove)
+
+    let evMousePull = observeE (makePullEvent evPullCoords <$> evPullStartCoords)
+    let evTouchPull = observeE (makePullEvent evTouchMoveCoords <$> evTouchStartCoords)
+
+    pure (unionWith const evMousePull evTouchPull)
   where
-    -- When the user releases the mouse, drag fires and gives 0,0 always.
-    -- Maybe that's a chrome bug?
-    -- This is our perhaps irresponsible way of eliminating that behaviour.
-    makeDelta (x1, y1) (x2, y2) =
-        if x2 == 0 && y2 == 0
-        then Nothing
-        else Just (x2 - x1, y2 - y1)
+    makeDelta (x1, y1) (x2, y2) = (x2 - x1, y2 - y1)
+    -- Given an event which fires with mouse coordinates, and the initial
+    -- mouse coordinates, produce an event which fires with incremental
+    -- deltas.
+    makePullEvent :: Event (Int, Int) -> (Int, Int) -> Moment (Event (Int, Int))
+    makePullEvent evDragCoords initial = do
+        beCoords <- stepper initial evDragCoords
+        pure (makeDelta <$> beCoords <@> evDragCoords)
+    -- Identify the touch start events which have a single touch point.
+    pickSingleTouchStart :: TouchStartData -> Maybe (Int, Int)
+    pickSingleTouchStart (TouchStartData hm) = case (HM.size hm, HM.lookup 0 hm) of
+        (1, Just coords) -> Just coords
+        _ -> Nothing
+    -- Identify the touch move events which have a single touch point.
+    pickSingleTouchMove :: TouchMoveData -> Maybe (Int, Int)
+    pickSingleTouchMove (TouchMoveData hm) = case (HM.size hm, HM.lookup 0 hm) of
+        (1, Just coords) -> Just coords
+        _ -> Nothing
+ 
+{-
+    -- TODO need the window mousemove and mouseup events. How to get these?
+    -- Also, we must be sensitive about unbinding these ones!
+    -- Or we could just have global window event bindings??
+    evMouseup <- event Mouseup
+    evDragStart <- event (DragStart showDragGhost)
+    evDrag <- event Drag
+    evTouchStart <- event TouchStart
+    evTouchMove <- event TouchMove
+    -- Coordinates of the mouse on drag start (first mouse move).
+    let evDragStartCoords = (\d -> (dragstartDataClientX d, dragstartDataClientY d)) <$> evDragStart
+    -- Coordinates of the mosue on a drag (subsequent mouse moves).
+    let evDragCoords = (\d -> (dragDataClientX d, dragDataClientY d)) <$> evDrag
+    let dragEvent = observeE (makeDragEvent evDragCoords <$> evDragStartCoords)
+    let touchEvent = observeE (makeDragEvent evTouchMoveCoords <$> evTouchStartCoords)
+    pure (unionWith const dragEvent touchEvent)
+       
+-}
 
 type Document = DOM.Types.Document
 type Element = DOM.Types.Element
@@ -1107,13 +1330,13 @@ style
     :: W3CTag tag
     => Sequence (Action Style)
     -> ElementBuilder tag ()
-style s = ElementBuilder $ lift (tell (Dual (Endo (schemaStyle (fmap pure s)))))
+style s = ElementBuilder $ (lift . lift) (tell (Dual (Endo (schemaStyle (fmap pure s)))))
 
 style'
     :: W3CTag tag
     => Sequence [Action Style]
     -> ElementBuilder tag ()
-style' s = ElementBuilder $ lift (tell (Dual (Endo (schemaStyle s))))
+style' s = ElementBuilder $ (lift . lift) (tell (Dual (Endo (schemaStyle s))))
 
 styleHover
     :: ( ElementEvent Mouseenter tag
@@ -1133,31 +1356,31 @@ attributes
     :: W3CTag tag
     => Sequence (Action Attributes)
     -> ElementBuilder tag ()
-attributes a = ElementBuilder $ lift (tell (Dual (Endo (schemaAttributes (fmap pure a)))))
+attributes a = ElementBuilder $ (lift . lift) (tell (Dual (Endo (schemaAttributes (fmap pure a)))))
 
 attributes'
     :: W3CTag tag
     => Sequence [Action Attributes]
     -> ElementBuilder tag ()
-attributes' a = ElementBuilder $ lift (tell (Dual (Endo (schemaAttributes a))))
+attributes' a = ElementBuilder $ (lift . lift) (tell (Dual (Endo (schemaAttributes a))))
 
 properties
     :: W3CTag tag
     => Sequence (Action Properties)
     -> ElementBuilder tag ()
-properties p = ElementBuilder $ lift (tell (Dual (Endo (schemaProperties (fmap pure p)))))
+properties p = ElementBuilder $ (lift . lift) (tell (Dual (Endo (schemaProperties (fmap pure p)))))
 
 properties'
     :: W3CTag tag
     => Sequence [Action Properties]
     -> ElementBuilder tag ()
-properties' p = ElementBuilder $ lift (tell (Dual (Endo (schemaProperties p))))
+properties' p = ElementBuilder $ (lift . lift) (tell (Dual (Endo (schemaProperties p))))
 
 postprocess
     :: W3CTag tag
     => Sequence Postprocess
     -> ElementBuilder tag ()
-postprocess p = ElementBuilder $ lift (tell (Dual (Endo (schemaPostprocess p))))
+postprocess p = ElementBuilder $ (lift . lift) (tell (Dual (Endo (schemaPostprocess p))))
 
 makeText :: Document -> T.Text -> MomentIO Text
 makeText document txt = do

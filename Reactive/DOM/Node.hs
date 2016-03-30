@@ -95,7 +95,7 @@ module Reactive.DOM.Node (
     , module Reactive.DOM.Internal.ChildrenContainer
     -- , module Reactive.DOM.Children.Cardinality
 
-    , makeDraggable
+    , touchPull
 
     ) where
 
