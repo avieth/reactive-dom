@@ -52,7 +52,7 @@ import GHCJS.Types
 import GHCJS.Marshal.Pure (PToJSVal, pToJSVal)
 import GHCJS.DOM.Types hiding (Event, Element, Document)
 import qualified GHCJS.DOM.Types as DOM.Types
-import GHCJS.DOM.Element hiding (Element)
+import GHCJS.DOM.Element hiding (Element, getStyle, getAttributes)
 import qualified GHCJS.DOM.Element as Element
 import GHCJS.DOM.Node as Node
 import GHCJS.DOM.Document hiding (Document)
@@ -793,6 +793,9 @@ newtype IdentifiedMap k v = IdentifiedMap {
       runIdentifiedMap :: (M.Map k v, Unique)
     }
 
+getIdentifiedMap :: IdentifiedMap k v -> M.Map k v
+getIdentifiedMap = fst . runIdentifiedMap
+
 instance (Show k, Show v) => Show (IdentifiedMap k v) where
     show im = let (m, u) = runIdentifiedMap im
               in  "IdentifiedMap " ++ show (hashUnique u) ++ " : " ++ show m
@@ -809,6 +812,13 @@ instance Eq (IdentifiedMap k v) where
 instance Ord (IdentifiedMap k v) where
     l `compare` r = snd (runIdentifiedMap l) `compare` snd (runIdentifiedMap r)
 
+instance Ord k => Semigroup (IdentifiedMap k v) where
+    left <> right = makeIdentifiedMap (getIdentifiedMap left `mappend` getIdentifiedMap right)
+
+instance Ord k => Monoid (IdentifiedMap k v) where
+    mempty = makeIdentifiedMap mempty
+    left `mappend` right = makeIdentifiedMap (getIdentifiedMap left `mappend` getIdentifiedMap right)
+
 data Action t = Set t | Unset t | NoOp
 
 runAction :: Eq t => Action t -> Endo [t]
@@ -817,29 +827,39 @@ runAction action = Endo $ case action of
     Unset t -> delete t
     NoOp -> id
 
+newtype Style = Style { getStyle :: IdentifiedMap T.Text T.Text }
+deriving instance Eq Style
+deriving instance Semigroup Style
+deriving instance Monoid Style
 
-type Properties = IdentifiedMap T.Text T.Text
-type Style = IdentifiedMap T.Text T.Text
-type Attributes = IdentifiedMap T.Text T.Text
+newtype Properties = Properties { getProperties :: IdentifiedMap T.Text T.Text }
+deriving instance Eq Properties
+deriving instance Semigroup Properties
+deriving instance Monoid Properties
+
+newtype Attributes = Attributes { getAttributes :: IdentifiedMap T.Text T.Text }
+deriving instance Eq Attributes
+deriving instance Semigroup Attributes
+deriving instance Monoid Attributes
 
 {-# NOINLINE makeStyle #-}
 makeStyle :: [(T.Text, T.Text)] -> Style
-makeStyle = makeIdentifiedMap . M.fromList
+makeStyle = Style . makeIdentifiedMap . M.fromList
 
 makeProperties :: [(T.Text, T.Text)] -> Properties
-makeProperties = makeIdentifiedMap . M.fromList
+makeProperties = Properties . makeIdentifiedMap . M.fromList
 
 makeAttributes :: [(T.Text, T.Text)] -> Attributes
-makeAttributes = makeIdentifiedMap . M.fromList
+makeAttributes = Attributes . makeIdentifiedMap . M.fromList
 
 computeStyle :: [Style] -> M.Map T.Text T.Text
-computeStyle = foldl (<>) M.empty . fmap (fst . runIdentifiedMap)
+computeStyle = foldl (<>) M.empty . fmap (fst . runIdentifiedMap . getStyle)
 
 computeProperties :: [Properties] -> M.Map T.Text T.Text
-computeProperties = computeStyle
+computeProperties = foldl (<>) M.empty . fmap (fst . runIdentifiedMap . getProperties)
 
 computeAttributes :: [Attributes] -> M.Map T.Text T.Text
-computeAttributes = computeStyle
+computeAttributes = foldl (<>) M.empty . fmap (fst . runIdentifiedMap . getAttributes)
 
 type ElementSchemaChild = Either Element Text
 
@@ -971,9 +991,6 @@ runElementSchema eschema document el = do
                 --let (add, remove) = diffProperties current props
                 removeProperties element current
                 addProperties element props
-                --putStrLn $ mconcat ["Properties input ", show new]
-                --putStrLn $ mconcat ["Removing properties ", show remove]
-                --putStrLn $ mconcat ["Adding properties ", show add]
                 writeIORef currentProperties props
         sequenceReactimate (changeProperties <$> sequence)
         return ()
@@ -1047,14 +1064,14 @@ runElementSchema eschema document el = do
     addStyle element style = do
         let styleList :: [(T.Text, Maybe T.Text, T.Text)]
             styleList = M.foldWithKey (\x y -> (:) (x, Just y, "")) [] style
-        Just css <- getStyle element
+        Just css <- Element.getStyle element
         forM_ styleList (\(x, y, z) -> setProperty css (textToJSString x) (textToJSString <$> y) (textToJSString z))
 
     removeStyle :: Element -> M.Map T.Text T.Text -> IO ()
     removeStyle element style = do
         let styleNames :: [T.Text]
             styleNames = M.keys style
-        Just css <- getStyle element
+        Just css <- Element.getStyle element
         -- We bind here because we have to give a type signature in order to
         -- disambiguate.
         _ :: [Maybe JSString] <- forM styleNames (removeProperty css . textToJSString)

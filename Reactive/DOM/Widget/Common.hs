@@ -88,7 +88,6 @@ setInputValue seqnc _ = do
     let ~(initial, _) = runSequence uniqueProperties
     changes <- sequenceChanges uniqueProperties
     properties' ([Set initial] |> (unsetSet <$> changes))
-    liftMomentIO (reactimate (Prelude.print <$> changes))
     pure ()
   where
     setValue :: T.Text -> Properties
