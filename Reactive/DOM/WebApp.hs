@@ -76,6 +76,7 @@ import Reactive.Banana.Frameworks
 import Reactive.Sequence
 import Reactive.DOM.Node
 import Reactive.DOM.Flow
+import Reactive.DOM.Style
 import Reactive.DOM.Children.Single
 import Reactive.DOM.Widget.Common
 import GHCJS.Types
@@ -88,10 +89,6 @@ import GHCJS.DOM.History
 import GHCJS.DOM.EventM
 import Data.JSString.Text
 import Web.HttpApiData
-
--- Seems we do need a special reactive state arrow transformer. Must obtain
--- from it a Behavior state. Ultimately we shall switchB on these when a
--- web app flow is run.
 
 -- | A Flow () s t with a DOM Window and some router hidden under a reader.
 --   Those data are necessary to manipulate browser history state and to
@@ -441,11 +438,9 @@ webApp' window router notFound = widget $ \(~((env, reactiveState), viewChildren
     let seqnc :: Sequence (Flow o () Void)
         seqnc = first |> rest
     --liftMomentIO (sequenceReactimate (const (putStrLn "webApp : flow changing") <$> seqnc))
-    -- Make every flow div inherit all style from the webApp div.
-    let inheritAll = always . Set $ makeStyle [("all", "inherit")]
-    let inheritAllModifier = modifier $ \x -> style inheritAll >> pure x
+    let styleModifier = modifier $ \_ -> style' (always [Set fullWidthHeight])
     let makeUI :: Flow o () Void -> UI (Sequence (Maybe o))
-        makeUI flow = ui (div (runFlow flow) `modifyr` inheritAllModifier)
+        makeUI flow = ui (div (runFlow flow) `modify_` styleModifier)
         -- NB the following will not typecheck.
         --   makeUI = ui . div . runFlow
         -- Why?
@@ -501,9 +496,8 @@ type WebAppFlow app o = WebAppFlowExplicit (WebAppRoutes app) (WebAppEnvironment
 
 -- | Since a WebApp needs control of the browser history, it's not suitable
 --   for embedding in other UIs. Thus we don't give you an OpenWidget, but
---   instead close it up as a div and render it in the body.
---   Its style is "all: inherit" so whatever you do to the body, you do to the
---   div.
+--   instead close it up as a div and render it in the body. Its height and
+--   width are set to 100%.
 webApp
     :: ( WebApp app
        , MakeRouter (WebAppRoutes app) (WebAppEnvironment app) (WebAppState app) router
@@ -517,13 +511,11 @@ webApp
     -> MomentIO ()
 webApp app window env state notFound router = do
     reactiveState <- newReactiveState state
-    let widget = div (webApp' window router' notFound)
-                 `modify_`
-                 (modifier $ \_ -> style' (always [Set inheritAll]))
+    let widget = div (webApp' window router' notFound) `modify_` styleModifier
     Just document <- liftIO (webViewGetDomDocument window)
     Just body <- getBody document
-    _ <- render document body (closeWidget Tag (lmap (const (env, reactiveState)) widget))
+    _ <- reactiveDom document body (always (closeWidget Tag (lmap (const (env, reactiveState)) widget)))
     pure ()
   where
     router' = makeRouter Proxy Proxy Proxy router
-    inheritAll = makeStyle [("all", "inherit")]
+    styleModifier = modifier $ \_ -> style' (always [Set fullWidthHeight])

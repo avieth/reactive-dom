@@ -149,14 +149,20 @@ liftMomentIO :: MomentIO t -> ElementBuilder tag t
 liftMomentIO = ElementBuilder . lift . lift . lift
 
 newtype Child t = Child {
-      runChild :: (t, SomeNode)
+      runChild :: (t, SomeNode, Event (IO ()))
     }
 
 childData :: Child t -> t
-childData = fst . runChild
+childData = (\(x,_,_) -> x) . runChild
 
 childNode :: forall t . Child t -> SomeNode
-childNode = snd . runChild
+childNode = (\(_,x,_) -> x) . runChild
+
+-- | The effects which will update the child node (local DOM mutations like
+--   chaning children or style). Do not export; there is no use for it outside
+--   of this module.
+childUpdates :: forall t . Child t -> Event (IO ())
+childUpdates = (\(_,_,x) -> x) . runChild
 
 data SetChild t where
     SetWidgetChild :: Either (Child t) (UI t) -> SetChild t
@@ -176,13 +182,13 @@ runSetChild child env document = Compose $ case child of
     SetTextChild txt -> do
         textNode <- makeText document txt
         node <- liftIO $ someText textNode
-        pure (Child ((), node))
+        pure (Child ((), node, never))
     SetWidgetChild (Left existing) ->
-        pure (Child (runChild existing))
+        pure existing
     SetWidgetChild (Right ui) -> do
-        (t, el) <- buildUI ui env document
+        (t, el, ev) <- buildUI env document ui
         node <- liftIO $ someElement el
-        pure (Child (t, node))
+        pure (Child (t, node, ev))
 
 data Children f = Children {
       childrenInitial :: f SetChild
@@ -469,6 +475,7 @@ makeChildrenInput
     -> Children f
     -> MomentIO ( ViewChildren f
                 , Sequence [ChildrenMutation SomeNode SomeNode]
+                , Event (IO ())
                 )
 makeChildrenInput env document childrenOutput = mdo
 
@@ -502,13 +509,26 @@ makeChildrenInput env document childrenOutput = mdo
     let mutationSequence :: Sequence [ChildrenMutation SomeNode SomeNode]
         mutationSequence = firstMutation |> restMutations
 
+    -- Is this derivation correct?
+    let firstUpdates :: Event (IO ())
+        firstUpdates = unionUpdates . childrenContainerList childUpdates $ firstChildren
+    let restUpdates :: Event (Event (IO ()))
+        restUpdates = unionUpdates . childrenContainerList childUpdates . fst <$> restChildren
+    allUpdates :: Event (IO ())
+        <- sequenceSwitchE (firstUpdates |> restUpdates)
+
     -- This give some indication of which DOM mutations are happening.
     -- Comment it out.
-    reactimate (Prelude.print <$> restMutations)
+    -- reactimate (Prelude.print <$> restMutations)
 
     pure ( ViewChildren firstChildren sequencedChanges (fst <$> restChildren)
          , mutationSequence
+         , allUpdates
          )
+  where
+
+    unionUpdates :: [Event (IO ())] -> Event (IO ())
+    unionUpdates = foldr (unionWith (>>)) never
 
 buildWidget
     :: forall tag s t .
@@ -517,7 +537,7 @@ buildWidget
     -> s
     -> UIEnvironment
     -> Document
-    -> MomentIO (t, Element)
+    -> MomentIO (t, Element, Event (IO ()))
 buildWidget (Widget l mk r) s env document = mdo
     Just el <- document `createElement` Just (w3cTagName (Tag :: Tag tag))
     let roelem = ReadOnlyElement el M.empty
@@ -531,10 +551,10 @@ buildWidget (Widget l mk r) s env document = mdo
     -- either argument.
     let ebuilder = do rec { (passforward, s') <- l passback s
                           ; rec { (t', childrenOutput) <- mk (s', childrenInput)
-                                ; (childrenInput, mutationSequence)
+                                ; (childrenInput, mutationSequence, childrenUpdates)
                                       <- liftMomentIO $ makeChildrenInput env document childrenOutput
                                 }
-                          ;  (passback, mt) <- r passforward t'
+                          ; (passback, mt) <- r passforward t'
                           }
                       -- This is crucial: the output computation runs outside
                       -- of the recursive knot above. Without this, it would
@@ -542,41 +562,73 @@ buildWidget (Widget l mk r) s env document = mdo
                       -- function with respect to the output of the intrinsic
                       -- part.
                       t <- mt
-                      pure (t, mutationSequence)
-    ((t, mutationSequence), roelem', eschemaDualEndo)
+                      pure (t, mutationSequence, childrenUpdates)
+    ((t, mutationSequence, childrenUpdates), roelem', eschemaDualEndo)
         <- buildElement ebuilder env roelem
     let eschema = appEndo (getDual eschemaDualEndo)
                 $ emptySchema
-    _ <- reactimateChildren el mutationSequence
-    _ <- runElementSchema eschema document el
+    let seqncChildrenIO = reactimateChildren el mutationSequence
+    seqncSchemaIO <- runElementSchema eschema document el
+    let seqncLocalIO = sequenceUnion (>>) seqncChildrenIO seqncSchemaIO
+    let initialLocalIO = sequenceFirst seqncLocalIO
+    let evLocalIO = sequenceEvent seqncLocalIO
+    let evIO = unionWith (>>) evLocalIO childrenUpdates
     liftIO (wireEvents roelem')
-    pure (t, el)
+    liftIO initialLocalIO
+    pure (t, el, evIO)
 
-buildUI :: UI t -> UIEnvironment -> Document -> MomentIO (t, Element)
-buildUI (ClosedWidget _ widget) = buildWidget widget ()
+buildUI :: UIEnvironment -> Document -> UI t -> MomentIO (t, Element, Event (IO ()))
+buildUI env doc (ClosedWidget _ widget) = buildWidget widget () env doc
 
+-- | Produce a sequence of effects which keep the children of some element up
+--   to date according to a sequence of mutations.
 reactimateChildren
     :: Element
     -> Sequence [ChildrenMutation SomeNode SomeNode]
-    -> MomentIO (Sequence ())
-reactimateChildren parent seqnc = do
-    sequenceCommute (liftIO . flip runChildrenMutationsIO parent <$> seqnc)
+    -> Sequence (IO ())
+reactimateChildren parent seqnc = flip runChildrenMutationsIO parent <$> seqnc
 
--- | Renders a UI to a document under a given parent.
---   
-render
+-- | Renders a sequence of UIs to a document under a given parent.
+reactiveDom
     :: ( IsNode parent
        )
     => Document
     -> parent
-    -> UI t
-    -> MomentIO (RenderedNode, t)
-render document parent ui = do
+    -> Sequence (UI t)
+    -> MomentIO (Sequence t)
+reactiveDom document parent seqncUi = do
     Just window <- getDefaultView document
     env <- makeUIEnvironment window
-    (t, el) <- buildUI ui env document
-    rendered <- renderElement parent el
-    pure (rendered, t)
+    -- Built the UIs.
+    seqncBuilt :: Sequence (t, Element, Event (IO ()))
+        <- sequenceCommute (buildUI env document <$> seqncUi)
+    -- Output is the first component.
+    let seqncT :: Sequence t
+        seqncT = (\(x,_,_) -> x) <$> seqncBuilt
+    -- From here we derive the element to place under the parent.
+    let seqncElem :: Sequence Element
+        seqncElem = (\(_,x,_) -> x) <$> seqncBuilt
+    -- From here we derive the effects which must be run in order to make
+    -- the element appear reactive.
+    let seqncUpdate :: Sequence (Event (IO ()))
+        seqncUpdate = (\(_,_,x) -> x) <$> seqncBuilt
+    let elFirst = sequenceFirst seqncElem
+    evElChanges :: Event (Element, Element)
+        <- sequenceChanges seqncElem
+    -- Render the first, and swap on changes.
+    liftIO (renderIt elFirst)
+    reactimate (swapIt <$> evElChanges)
+    -- Run the updates.
+    evUpdate <- sequenceSwitchE seqncUpdate
+    reactimate evUpdate
+    pure seqncT
+  where
+    renderIt :: Element -> IO ()
+    renderIt el = parent `appendChild` (Just el) >> pure ()
+    unrenderIt :: Element -> IO ()
+    unrenderIt el = parent `removeChild` (Just el) >> pure ()
+    swapIt :: (Element, Element) -> IO ()
+    swapIt (old, new) = unrenderIt old >> renderIt new
 
 -- | For use in ElementBuilder state. Gives access to certain features of
 --   a DOM element and holds deferred event bindings.
@@ -1075,14 +1127,14 @@ makeProperties = Properties . makeIdentifiedMap . M.fromList
 makeAttributes :: [(T.Text, T.Text)] -> Attributes
 makeAttributes = Attributes . makeIdentifiedMap . M.fromList
 
-computeStyle :: [Style] -> M.Map T.Text T.Text
-computeStyle = foldl (<>) M.empty . fmap (fst . runIdentifiedMap . getStyle)
+computeStyle :: [Style] -> Style
+computeStyle = mconcat
 
-computeProperties :: [Properties] -> M.Map T.Text T.Text
-computeProperties = foldl (<>) M.empty . fmap (fst . runIdentifiedMap . getProperties)
+computeProperties :: [Properties] -> Properties
+computeProperties = mconcat
 
-computeAttributes :: [Attributes] -> M.Map T.Text T.Text
-computeAttributes = foldl (<>) M.empty . fmap (fst . runIdentifiedMap . getAttributes)
+computeAttributes :: [Attributes] -> Attributes
+computeAttributes = mconcat
 
 type ElementSchemaChild = Either Element Text
 
@@ -1176,47 +1228,63 @@ schemaPostprocess post schema = schema {
         (flip sequencePostprocess) <$> sequenceBuilder new
                                    <*> existing
 
-runElementSchema :: ElementSchema -> Document -> Element -> MomentIO ()
+-- | From an ElementSchema derive a sequence of effects which must be realized
+--   in order for the element to respect the schema.
+runElementSchema
+    :: ( MonadMoment m )
+    => ElementSchema
+    -> Document
+    -> Element
+    -> m (Sequence (IO ()))
 runElementSchema eschema document el = do
-    -- Reactimating these sequences probably causes a space leak. As far as I
-    -- know, reactimating an event keeps that event alive... seems that's how
-    -- it has to be.
-    -- In typical use, these events will often be never (in case of constant
-    -- style, attributes, properties). But every non-never event which is
-    -- used to define these sequences will never be collected! We need some way
-    -- to "unreactimate" when the element is collected.
     propsSequence <- buildSequence (elementSchemaProperties eschema)
     attrsSequence <- buildSequence (elementSchemaAttributes eschema)
     styleSequence <- buildSequence (elementSchemaStyle eschema)
     postsSequence <- buildSequence (elementSchemaPostprocess eschema)
-    reactimateProperties el propsSequence
-    reactimateAttributes el attrsSequence
-    reactimateStyle el styleSequence
-    reactimatePostprocess document el postsSequence
-    pure ()
+    propsSequenceIO <- reactimateProperties el propsSequence
+    attrsSequenceIO <- reactimateAttributes el attrsSequence
+    styleSequenceIO <- reactimateStyle el styleSequence
+    let ppSequenceIO = reactimatePostprocess document el postsSequence
+    let sequenceIO = sequenceUnion (>>) propsSequenceIO
+                   $ sequenceUnion (>>) attrsSequenceIO
+                   $ sequenceUnion (>>) styleSequenceIO
+                                        ppSequenceIO
+    pure sequenceIO
 
   where
 
-    reactimatePostprocess :: Document -> Element -> Sequence Postprocess -> MomentIO ()
-    reactimatePostprocess document element sequence = do
-        sequenceReactimate ((\x -> runPostprocess x document element) <$> sequence)
+    reactimatePostprocess
+        :: Document
+        -> Element
+        -> Sequence Postprocess
+        -> Sequence (IO ())
+    reactimatePostprocess document element sequence =
+        (\x -> runPostprocess x document element) <$> sequence
 
-    reactimateProperties :: Element -> Sequence [Properties] -> MomentIO ()
+    reactimateProperties
+        :: ( MonadMoment m )
+        => Element
+        -> Sequence [Properties]
+        -> m (Sequence (IO ()))
     reactimateProperties element sequence = do
-        currentProperties <- liftIO $ newIORef mempty
-        -- For properties we don't diff, as these are sometimes changed by
-        -- user input.
-        let changeProperties :: [Properties] -> IO ()
-            changeProperties new = do
-                let props :: M.Map T.Text T.Text
-                    props = computeProperties new
-                current <- readIORef currentProperties
-                --let (add, remove) = diffProperties current props
-                removeProperties element current
-                addProperties element props
-                writeIORef currentProperties props
-        sequenceReactimate (changeProperties <$> sequence)
-        return ()
+        let seqncFirst = sequenceFirst sequence
+        let initial = mconcat seqncFirst
+        let seqncEvent = sequenceEvent sequence
+        let evProperties = mconcat <$> seqncEvent
+        beProperties <- stepper initial evProperties
+        let changes = (,) <$> beProperties <@> evProperties
+        let changeProperties :: Properties -> Properties -> IO ()
+            changeProperties old new = do
+                let propsOld :: M.Map T.Text T.Text
+                    propsOld = getIdentifiedMap (getProperties old)
+                let propsNew :: M.Map T.Text T.Text
+                    propsNew = getIdentifiedMap (getProperties new)
+                removeProperties element propsOld
+                addProperties element propsNew
+                pure ()
+        let initialIO = changeProperties mempty initial
+        let restIO = uncurry changeProperties <$> changes
+        pure (initialIO |> restIO)
 
     addProperties :: Element -> M.Map T.Text T.Text -> IO ()
     addProperties element properties = do
@@ -1237,19 +1305,31 @@ runElementSchema eschema document el = do
         toRemove = M.differenceWith justWhenDifferent old new
         justWhenDifferent x y = if x /= y then Just x else Nothing
 
-
-    reactimateAttributes :: Element -> Sequence [Attributes] -> MomentIO ()
+    reactimateAttributes
+        :: ( MonadMoment m )
+        => Element
+        -> Sequence [Attributes]
+        -> m (Sequence (IO ()))
     reactimateAttributes element sequence = do
-        currentAttributes <- liftIO $ newIORef mempty
-        let changeAttributes new = do
-                let attrs = computeAttributes new
-                current <- readIORef currentAttributes
-                let (add, remove) = diffAttributes current attrs
+        let seqncFirst = sequenceFirst sequence
+        let initial = mconcat seqncFirst
+        let seqncEvent = sequenceEvent sequence
+        let evAttributes = mconcat <$> seqncEvent
+        beAttributes <- stepper initial evAttributes
+        let changes = (,) <$> beAttributes <@> evAttributes
+        let changeAttributes :: Attributes -> Attributes -> IO ()
+            changeAttributes old new = do
+                let attrsOld :: M.Map T.Text T.Text
+                    attrsOld = getIdentifiedMap (getAttributes old)
+                let attrsNew :: M.Map T.Text T.Text
+                    attrsNew = getIdentifiedMap (getAttributes new)
+                let (add, remove) = diffAttributes attrsOld attrsNew
                 removeAttributes element remove
                 addAttributes element add
-                writeIORef currentAttributes attrs
-        sequenceReactimate (changeAttributes <$> sequence)
-        return ()
+                pure ()
+        let initialIO = changeAttributes mempty initial
+        let restIO = uncurry changeAttributes <$> changes
+        pure (initialIO |> restIO)
 
     addAttributes :: Element -> M.Map T.Text T.Text -> IO ()
     addAttributes el attrs = do
@@ -1269,19 +1349,31 @@ runElementSchema eschema document el = do
         toRemove = M.differenceWith justWhenDifferent old new
         justWhenDifferent x y = if x /= y then Just x else Nothing
 
-
-    reactimateStyle :: Element -> Sequence [Style] -> MomentIO ()
+    reactimateStyle
+        :: ( MonadMoment m )
+        => Element
+        -> Sequence [Style]
+        -> m (Sequence (IO ()))
     reactimateStyle element sequence = do
-        currentStyle <- liftIO $ newIORef mempty
-        let changeStyle new = do
-                let styl = computeStyle new
-                current <- readIORef currentStyle
-                let (add, remove) = diffStyle current styl
+        let seqncFirst = sequenceFirst sequence
+        let initial = mconcat seqncFirst
+        let seqncEvent = sequenceEvent sequence
+        let evStyle = mconcat <$> seqncEvent
+        beStyle <- stepper initial evStyle
+        let changes = (,) <$> beStyle <@> evStyle
+        let changeStyle :: Style -> Style -> IO ()
+            changeStyle old new = do
+                let styleOld :: M.Map T.Text T.Text
+                    styleOld = getIdentifiedMap (getStyle old)
+                let styleNew :: M.Map T.Text T.Text
+                    styleNew = getIdentifiedMap (getStyle new)
+                let (add, remove) = diffStyle styleOld styleNew
                 removeStyle element remove
                 addStyle element add
-                writeIORef currentStyle styl
-        sequenceReactimate (changeStyle <$> sequence)
-        return ()
+                pure ()
+        let initialIO = changeStyle mempty initial
+        let restIO = uncurry changeStyle <$> changes
+        pure (initialIO |> restIO)
 
     addStyle :: Element -> M.Map T.Text T.Text -> IO ()
     addStyle element style = do
@@ -1387,48 +1479,3 @@ makeText document txt = do
     let txtJSString :: JSString = textToJSString txt
     Just txt <- document `createTextNode` txtJSString
     pure txt
-
-data RenderedNode = RenderedNode {
-      renderedElementSchemaChild :: Either Element Text
-    , unrenderNode :: IO ()
-    }
-
-renderElement
-    :: ( IsNode parent
-       , MonadIO m
-       )
-    => parent
-    -> Element
-    -> m RenderedNode
-renderElement parent el = do
-    parent `appendChild` (Just el)
-    let unrender = parent `removeChild` (Just el) >> pure ()
-    pure $ RenderedNode (Left el) unrender
-
--- | Append some Text to a given node.
-renderText
-    :: ( IsNode parent
-       , MonadIO m
-       )
-    => parent
-    -> Text
-    -> m RenderedNode
-renderText parent txt = do
-    parent `appendChild` (Just txt)
-    let unrender = parent `removeChild` (Just txt) >> pure ()
-    pure $ RenderedNode (Right txt) unrender
-
--- | Render a text node or element.
-renderChild
-    :: ( IsNode parent
-       , MonadIO m
-       )
-    => parent
-    -> Either Element Text
-    -> m RenderedNode
-renderChild parent =
-    either (renderElement parent)
-           (renderText parent)
-
-unrender :: RenderedNode -> MomentIO ()
-unrender = liftIO . unrenderNode

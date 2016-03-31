@@ -27,6 +27,7 @@ library
                      , Reactive.DOM.Xhr
                      , Reactive.DOM.Geolocation
                      , Reactive.DOM.WebApp
+                     , Reactive.DOM.Style
                      , Reactive.DOM.Widget.Common
                      , Reactive.DOM.Widget.List
                      , Reactive.DOM.Widget.Picture

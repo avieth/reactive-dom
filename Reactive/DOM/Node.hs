@@ -13,8 +13,7 @@ Portability : non-portable (GHC only)
 
 module Reactive.DOM.Node (
 
-      render
-    , unrender
+      reactiveDom
     , ElementBuilder
     , liftMomentIO
     , Tag(..)
