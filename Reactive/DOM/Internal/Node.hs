@@ -57,6 +57,7 @@ import GHCJS.DOM.Element hiding (Element, getStyle, getAttributes)
 import qualified GHCJS.DOM.Element as Element
 import GHCJS.DOM.Node as Node
 import qualified GHCJS.DOM.Window as Window
+import GHCJS.DOM.RequestAnimationFrameCallback
 import GHCJS.DOM.Document as Document hiding (Document)
 import GHCJS.DOM.EventM hiding (event)
 import qualified GHCJS.DOM.EventM as EventM
@@ -82,16 +83,21 @@ import System.IO.Unsafe
 import Unsafe.Coerce
 
 -- | Some UI-global data.
+--
+--   TODO give a way to unbind everything bound by makeUIEnvironment.
 data UIEnvironment = UIEnvironment {
       uiEnvironmentWindowMousemove :: Event (Int, Int)
     , uiEnvironmentWindowMouseup :: Event (Int, Int)
+    , uiEnvironmentAnimationFrame :: Event (Double)
+    -- ^ Value is a decimal timestamp in milliseconds with microsecond precision
     }
 
 makeUIEnvironment :: Window -> MomentIO UIEnvironment
 makeUIEnvironment window = do
     mousemove <- windowMousemove window
     mouseup <- windowMouseup window
-    pure (UIEnvironment mousemove mouseup)
+    animationFrame <- windowAnimationFrame window
+    pure (UIEnvironment mousemove mouseup animationFrame)
   where
     windowMousemove :: Window -> MomentIO (Event (Int, Int))
     windowMousemove window = do
@@ -113,12 +119,25 @@ makeUIEnvironment window = do
             liftIO $ fire (x, y)
             pure ()
         pure ev
+    windowAnimationFrame :: Window -> MomentIO (Event (Double))
+    windowAnimationFrame window = do
+        (ev, fire) <- newEvent
+        -- TBD how to implement canceling of the animation frame? Store the
+        -- id in a behavior, grab it, cancel it?
+        rec { let cb = \ts -> do
+                      Window.requestAnimationFrame window (Just rafCb)
+                      fire ts
+            ; rafCb <- newRequestAnimationFrameCallback cb
+        }
+        _ <- Window.requestAnimationFrame window (Just rafCb)
+        pure ev
+
 
 -- | A monad in which DOM elements are described. It's parameterized by a
 --   Symbol which presumably is one of the W3C standard tag names.
 newtype ElementBuilder (tag :: Symbol) t = ElementBuilder {
       runElementBuilder
-          :: ReaderT UIEnvironment
+          :: ReaderT (UIEnvironment)
              (StateT (ReadOnlyElement tag)
              (WriterT (Dual (Endo ElementSchema))
              MomentIO))
@@ -748,6 +767,11 @@ scrollWidth = ElementBuilder $ do
     el <- lift get
     pure (IOEvent (getScrollWidth (getReadOnlyElement el)))
 
+animationFrame :: forall tag . ElementBuilder tag (Event Double)
+animationFrame = ElementBuilder $ do
+    env <- ask
+    pure (uiEnvironmentAnimationFrame env)
+
 -- TODO HasEvent tag event
 event
     :: forall event tag . 
@@ -1041,25 +1065,6 @@ touchPull = modifier $ \_ -> do
     pickSingleTouchMove (TouchMoveData hm) = case (HM.size hm, HM.lookup 0 hm) of
         (1, Just coords) -> Just coords
         _ -> Nothing
- 
-{-
-    -- TODO need the window mousemove and mouseup events. How to get these?
-    -- Also, we must be sensitive about unbinding these ones!
-    -- Or we could just have global window event bindings??
-    evMouseup <- event Mouseup
-    evDragStart <- event (DragStart showDragGhost)
-    evDrag <- event Drag
-    evTouchStart <- event TouchStart
-    evTouchMove <- event TouchMove
-    -- Coordinates of the mouse on drag start (first mouse move).
-    let evDragStartCoords = (\d -> (dragstartDataClientX d, dragstartDataClientY d)) <$> evDragStart
-    -- Coordinates of the mosue on a drag (subsequent mouse moves).
-    let evDragCoords = (\d -> (dragDataClientX d, dragDataClientY d)) <$> evDrag
-    let dragEvent = observeE (makeDragEvent evDragCoords <$> evDragStartCoords)
-    let touchEvent = observeE (makeDragEvent evTouchMoveCoords <$> evTouchStartCoords)
-    pure (unionWith const dragEvent touchEvent)
-       
--}
 
 type Document = DOM.Types.Document
 type Element = DOM.Types.Element
