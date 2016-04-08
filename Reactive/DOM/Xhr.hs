@@ -91,6 +91,7 @@ instance Ord Xhr where
 instance Show Xhr where
     show (Xhr (_, u, _)) = mconcat ["Xhr ", show (hashUnique u)]
 
+-- | Kill an Xhr.
 cancelXhr :: Xhr -> IO ()
 cancelXhr xhr@(Xhr (xhr_, _, _)) = do
     putStrLn ("cancelXhr : cancelling " ++ show xhr)
@@ -112,6 +113,7 @@ instance Show XhrMethod where
         POST -> "POST"
         DELETE -> "DELETE"
 
+-- | Request data, sufficient to spawn an Xhr.
 data XhrRequest = XhrRequest {
       xhrRequestMethod :: XhrMethod
     , xhrRequestURL :: XhrURL
@@ -122,6 +124,7 @@ data XhrRequest = XhrRequest {
 
 deriving instance Show XhrRequest
 
+-- | Raw Xhr response data.
 data XhrResponse = XhrResponse {
       xhrResponseStatus :: XhrStatus
     , xhrResponseHeaders :: XhrHeaders
@@ -149,36 +152,27 @@ makeXhrFromRequest xhrRequest = do
         username = textToJSString . fst <$> maybeAuth
     let password :: Maybe JSString
         password = textToJSString . snd <$> maybeAuth
-    --let traceString = mconcat [
-    --          "makeXhrFromRequest "
-    --        , show (xhrRequestMethod xhrRequest)
-    --        , " to "
-    --        , show (xhrRequestURL xhrRequest)
-    --        , " with headers "
-    --        , show (reqHeaders)
-    --        ]
-    --liftIO (putStrLn traceString)
+    -- Open the Xhr (headers and body are set later)
     open xhrObject (show (xhrRequestMethod xhrRequest))
                    (reqUrl)
                    (Just True) -- True meaning do not block
                    (username)
                    (password)
+    -- Set the headers.
     forM_ reqHeaders (uncurry (setRequestHeader xhrObject))
+    -- How to send the request depends upon the nature of the body.
+    -- In either case, we do it in a separate thread.
     thread <- case xhrRequestBody xhrRequest of
         Nothing -> liftIO $ do
-            --putStrLn (mconcat ["makeXhrFromRequest empty body"])
             async (send xhrObject)
         Just txt -> liftIO $ do
-            --putStrLn (mconcat ["makeXhrFromRequest body ", show txt])
-            --putStrLn (mconcat ["makeXhrFromRequest body"])
             async $ do
                 sendString xhrObject (lazyTextToJSString txt)
-                --putStrLn (mconcat ["makeXhrFromRequest body sent"])
 
+    -- Create the Xhr object.
     uniq <- liftIO newUnique
     (evValue, fireValue) <- newEvent
     let xhr = Xhr (xhrObject, uniq, evValue)
-    liftIO (putStrLn ("makeXhrFromRequest : spawning " ++ show xhr))
 
     -- When the state changes to 4, we build an XhrResponse and fire the event.
     liftIO $ on xhrObject readyStateChange $ do
@@ -187,13 +181,6 @@ makeXhrFromRequest xhrRequest = do
                  -- we check both.
                  readyState <- getReadyState xhrObject
                  status <- getStatus xhrObject
-
-                 --let traceString = mconcat [
-                 --          "makeXhrFromRequest changed ready state to "
-                 --        , show readyState
-                 --        ]
-                 --liftIO (putStrLn traceString)
-                 
                  if readyState /= 4 || status == 0
                  then return ()
                  else do -- getAllResponseHeaders just gives a string; we've got
@@ -206,7 +193,6 @@ makeXhrFromRequest xhrRequest = do
                              let response = XhrResponse (fromIntegral status)
                                                         (headers)
                                                         (lazyTextFromJSString <$> responseText)
-                             liftIO $ putStrLn ("Xhr yielding response for : " ++ show xhr)
                              liftIO $ fireValue response
     pure xhr
 
@@ -214,6 +200,7 @@ makeXhrFromRequest xhrRequest = do
 corsPreflight :: [(T.Text, T.Text)] -> Bool
 corsPreflight = elem (T.toCaseFold "Access-Control-Allow-Origin") . fmap (T.toCaseFold . fst)
 
+-- | Convert raw response headers into key/value pairs.
 marshallResponseHeaders :: T.Text -> [(T.Text, T.Text)]
 marshallResponseHeaders text =
     let brokenCRLF = T.splitOn "\r\n" text
@@ -225,18 +212,17 @@ marshallResponseHeaders text =
                                  else (key, T.tail value)
     in  breakOnColon <$> brokenCRLF
 
--- | An ArrowApply formulation of an Xhr handler: essentially a function
---     s -> (XhrRequest, XhrResponse -> t)
---   along with formal combinations to make it an ArrowApply and to allow for
---   explicit parallelism.
+-- | An ArrowApply formulation of an Xhr handler: simpler handlers from
+--   XhrRequest to XhrResponse, with a formal ArrowApply interface and a
+--   term to express parallelism.
 data XhrHandler s t where
+    XhrHandlerOne :: XhrHandler XhrRequest XhrResponse
+    XhrHandlerParallel :: XhrHandler s1 t1 -> XhrHandler s2 t2 -> XhrHandler (s1, s2) (t1, t2)
     XhrHandlerArr :: (s -> t) -> XhrHandler s t
     XhrHandlerComp :: XhrHandler u t -> XhrHandler s u -> XhrHandler s t
     XhrHandlerFirst :: XhrHandler s t -> XhrHandler (s, c) (t, c)
     XhrHandlerLeft :: XhrHandler s t -> XhrHandler (Either s c) (Either t c)
     XhrHandlerApp :: XhrHandler (XhrHandler s t, s) t
-    XhrHandlerParallel :: XhrHandler s1 t1 -> XhrHandler s2 t2 -> XhrHandler (s1, s2) (t1, t2)
-    XhrHandlerOne :: (s -> (XhrRequest, XhrResponse -> t)) -> XhrHandler s t
 
 instance Category XhrHandler where
     id = arr id
@@ -263,9 +249,8 @@ instance Applicative (XhrHandler s) where
     pure = arr . const
     hf <*> hx = arr (\s -> (s, s)) >>> XhrHandlerParallel hf hx >>> arr (uncurry ($))
 
--- | An atomic Xhr handler: say how to make a request and how to handle a
---   response.
-xhrHandler :: (s -> (XhrRequest, XhrResponse -> t)) -> XhrHandler s t
+-- | An atomic Xhr handler.
+xhrHandler :: XhrHandler XhrRequest XhrResponse
 xhrHandler = XhrHandlerOne
 
 -- | Indicate that two XhrHandlers should be run parallel. Actually, their
@@ -290,6 +275,8 @@ xhrParallelTraverse handler = proc it -> do
         traversed = sequenceA it'
     app -< (traversed, ())
 
+-- | Representation of a change to an Xhr: it's spawned or it's finished
+--   (no indication of success or failure or cancel).
 data XhrChange = Spawn Xhr | Finish Xhr
   deriving (Show)
 
@@ -301,7 +288,9 @@ pickFinish :: XhrChange -> Maybe Xhr
 pickFinish (Finish x) = Just x
 pickFinish _ = Nothing
 
--- TODO use a set instead.
+-- | Alter a list of Xhrs according to a nonempty list of changes.
+--   Spawns are added, finishes are removed.
+--   TODO use a set instead.
 mergeXhrChanges :: NonEmpty XhrChange -> [Xhr] -> [Xhr]
 mergeXhrChanges news olds =
     let list = toList news
@@ -338,7 +327,7 @@ sequenceXhrContinuations
 sequenceXhrContinuations (XhrContinuation x) k = case x of
     Left s -> k s
     Right m -> XhrContinuation . Right $ do
-        -- Something we know: evXhrs will not fire after evS.
+        -- evXhrs will not fire after evS.
         (evS, xhrs, evXhrsS) <- m
         let evNext :: Banana.Event (Either t (MomentIO (Banana.Event t, NonEmpty Xhr, Banana.Event (NonEmpty XhrChange))))
             evNext = runXhrContinuation . k <$> evS
@@ -346,6 +335,7 @@ sequenceXhrContinuations (XhrContinuation x) k = case x of
         let evNextImmediate :: Banana.Event t
             evNextImmediate = filterJust (either Just (const Nothing) <$> evNext)
         -- Pick the delayed case.
+        -- evNextDelayed fires if and only if evNextImmediate never fires.
         evNextDelayed :: Banana.Event (Banana.Event t, NonEmpty Xhr, Banana.Event (NonEmpty XhrChange))
             <- execute (filterJust (either (const Nothing) Just <$> evNext))
         -- The value event. Either it comes immediately from the next one (next
@@ -433,14 +423,12 @@ runXhrHandler handler k = case handler of
             parallel = parallelXhrContinuations left' right'
         -- ... and then sequence the continuation after it.
         in  sequenceXhrContinuations parallel k
-    XhrHandlerOne mk -> \s ->
-        let (req, mkres) = mk s
-            thisOne = XhrContinuation . Right $ do
+    XhrHandlerOne -> \req ->
+        let thisOne = XhrContinuation . Right $ do
                 xhr@(Xhr (xhrObj, _, evFinish))
                     <- makeXhrFromRequest req
-                let ev = mkres <$> evFinish
                 let xhrChanges = const (Finish xhr :| []) <$> evFinish
-                pure (ev, xhr :| [], xhrChanges)
+                pure (evFinish, xhr :| [], xhrChanges)
         in  sequenceXhrContinuations thisOne k
 
 -- | Convenient way of going straight to a MomentIO: make an XhrContinuation and
@@ -455,7 +443,7 @@ evalXhrHandler handler s = do
         Left t -> pure (Left t)
         Right m -> Right <$> m
 
--- | Run an XhrHandler immediately. 
+-- | Run an XhrHandler immediately.
 xhr1 :: XhrHandler s t -> s -> MomentIO (Eventually t)
 xhr1 handler s = do
     let cont = runXhrHandler handler trivialXhrContinuation s
@@ -475,6 +463,8 @@ xhrMany
     -> Compose MomentIO Banana.Event t
 xhrMany handler sev = Compose $ mdo
 
+    -- Whenever the input event fires, we cancel in-flight Xhrs (a behavior
+    -- defined later) and spawn the new one.
     continuations :: Banana.Event (Either t (Banana.Event t, NonEmpty Xhr, Banana.Event (NonEmpty XhrChange)))
         <- execute (runXhrHandlerAndCancel handler <$> currentXhrs <@> sev)
 
@@ -496,15 +486,15 @@ xhrMany handler sev = Compose $ mdo
     changeXhrs :: Banana.Event (NonEmpty XhrChange)
         <- switchE ((\(_,_,x) -> x) <$> delayeds)
 
+    -- Whenever sev fires, everything in currentXhrs will be cancelled, so we
+    -- want to forget about them. Simultaneous with sev is the firstXhrs event
+    -- giving the new spawns corresponding to sev, so we just make a union and
+    -- favour that.
     let updateCurrentXhrs :: Banana.Event [Xhr]
         updateCurrentXhrs = unionWith const
                                       (toList <$> firstXhrs)
                                       (flip mergeXhrChanges <$> currentXhrs <@> changeXhrs)
 
-    -- Whenever sev fires, everything in currentXhrs will be cancelled, so we
-    -- want to forget about them. Simultaneous with sev is the firstXhrs event
-    -- giving the new spawns corresponding to sev, so we just make a union and
-    -- favour that.
     currentXhrs :: Behavior [Xhr]
         <- stepper [] updateCurrentXhrs
 
