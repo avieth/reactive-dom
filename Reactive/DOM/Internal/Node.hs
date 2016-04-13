@@ -72,6 +72,7 @@ import GHCJS.DOM.Touch (Touch)
 import qualified GHCJS.DOM.Touch as Touch
 import GHCJS.DOM.TouchList (TouchList)
 import qualified GHCJS.DOM.TouchList as TouchList
+import GHCJS.DOM.KeyboardEvent (getKeyIdentifier)
 import GHCJS.DOM.UIEvent (getKeyCode)
 import Data.Maybe (mapMaybe)
 import qualified Data.HashMap.Strict as HM
@@ -98,6 +99,9 @@ data UIEnvironment = UIEnvironment {
     , uiEnvironmentWindowKeyup :: Event KeyupData
     , uiEnvironmentAnimationFrame :: Event Double
     -- ^ Value is a decimal timestamp in milliseconds with microsecond precision
+    , uiEnvironmentRequestAnimationFrame :: MomentIO (Event Double)
+    -- ^ Take one animation frame. The Event will fire precisely once, on the
+    -- next frame.
     }
 
 makeUIEnvironment :: Window -> MomentIO UIEnvironment
@@ -108,7 +112,13 @@ makeUIEnvironment window = do
     keypress <- windowKeypress window
     keyup <- windowKeyup window
     animationFrame <- windowAnimationFrame window
-    pure (UIEnvironment mousemove mouseup keydown keypress keyup animationFrame)
+    pure $ UIEnvironment mousemove
+                         mouseup
+                         keydown
+                         keypress
+                         keyup
+                         animationFrame
+                         (windowRequestAnimationFrame window)
   where
     windowMousemove :: Window -> MomentIO (Event MouseEventData)
     windowMousemove window = do
@@ -151,6 +161,12 @@ makeUIEnvironment window = do
                       fire ts
             ; rafCb <- newRequestAnimationFrameCallback cb
         }
+        _ <- Window.requestAnimationFrame window (Just rafCb)
+        pure ev
+    windowRequestAnimationFrame :: Window -> MomentIO (Event Double)
+    windowRequestAnimationFrame window = do
+        (ev, fire) <- newEvent
+        rafCb <- newRequestAnimationFrameCallback fire
         _ <- Window.requestAnimationFrame window (Just rafCb)
         pure ev
 
@@ -827,8 +843,16 @@ windowKeypress = uiEnvironmentWindowKeypress <$> ElementBuilder ask
 windowKeyup :: ElementBuilder tag (Event KeyupData)
 windowKeyup = uiEnvironmentWindowKeyup <$> ElementBuilder ask
 
+-- | Event animation frame.
 animationFrame :: ElementBuilder tag (Event Double)
 animationFrame = uiEnvironmentAnimationFrame <$> ElementBuilder ask
+
+-- | Take the next animation frame. The event will fire once and only once.
+requestAnimationFrame :: ElementBuilder tag (Event Double)
+requestAnimationFrame = do
+    env <- ElementBuilder ask
+    let request = uiEnvironmentRequestAnimationFrame env 
+    liftMomentIO request
 
 -- | By using event, the tag of the ElementBuilder is constrained, so that if
 --   used as a modifier in a Widget, the Widget can no longer be open.
@@ -1076,10 +1100,20 @@ instance ElementEvent Keyup Window where
     eventData _ _ ev = KeyupData <$> getKeyCode ev <*> getKey ev
 
 -- Seems ghcjs-dom does not offer a getter for the 'key' property of
--- KeyboardEvent
-foreign import javascript safe "$1[\"key\"]" js_getKey :: UIEvent -> IO JSString
+-- KeyboardEvent. It's a rather cutting edge feature, which Safari does not
+-- implement, so we fall back to keyIdentifier
+foreign import javascript safe
+    "$1[\"key\"]"
+    js_getKey :: UIEvent -> IO (Nullable JSString)
+getKeyUnsafe :: KeyboardEvent -> IO (Maybe T.Text)
+getKeyUnsafe ev = fmap textFromJSString . nullableToMaybe <$> js_getKey (toUIEvent ev)
+
 getKey :: KeyboardEvent -> IO T.Text
-getKey ev = textFromJSString <$> js_getKey (toUIEvent ev)
+getKey ev = do
+    maybeKey <- getKeyUnsafe ev
+    case maybeKey of
+        Nothing -> getKeyIdentifier ev
+        Just x -> pure x
 
 data Submit = Submit
 instance ElementEvent Submit Element where
