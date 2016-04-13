@@ -51,26 +51,28 @@ import qualified Data.Text as T
 import Data.JSString.Text
 import GHCJS.Types
 import GHCJS.Marshal.Pure (PToJSVal, pToJSVal)
-import GHCJS.DOM.Types hiding (Event, Element, Document)
+import GHCJS.DOM.Types hiding (Event, Element, Document, ClientRect)
 import qualified GHCJS.DOM.Types as DOM.Types
-import GHCJS.DOM.Element hiding (Element, getStyle, getAttributes)
+import GHCJS.DOM.Element hiding (Element, getStyle, getAttributes, ClientRect)
 import qualified GHCJS.DOM.Element as Element
+import qualified GHCJS.DOM.ClientRect as ClientRect
 import GHCJS.DOM.Node as Node
 import qualified GHCJS.DOM.Window as Window
 import GHCJS.DOM.RequestAnimationFrameCallback
 import GHCJS.DOM.Document as Document hiding (Document)
-import GHCJS.DOM.EventM hiding (event)
+import GHCJS.DOM.EventM hiding (event, mouseClientX, mouseClientY)
 import qualified GHCJS.DOM.EventM as EventM
 import GHCJS.DOM.EventTargetClosures
 import GHCJS.DOM.CSSStyleDeclaration
 import GHCJS.DOM.HTMLInputElement (getValue)
-import GHCJS.DOM.MouseEvent (getDataTransfer, getClientX, getClientY)
+import GHCJS.DOM.MouseEvent (getDataTransfer, getClientX, getClientY, getOffsetX, getOffsetY)
 import GHCJS.DOM.DataTransfer
 import GHCJS.DOM.TouchEvent (getChangedTouches)
 import GHCJS.DOM.Touch (Touch)
 import qualified GHCJS.DOM.Touch as Touch
 import GHCJS.DOM.TouchList (TouchList)
 import qualified GHCJS.DOM.TouchList as TouchList
+import GHCJS.DOM.UIEvent (getKeyCode)
 import Data.Maybe (mapMaybe)
 import qualified Data.HashMap.Strict as HM
 import Reactive.Banana.Combinators
@@ -79,6 +81,9 @@ import Reactive.Sequence
 import Reactive.DOM.Internal.Tag
 import Reactive.DOM.Internal.Mutation
 import Reactive.DOM.Internal.ChildrenContainer
+-- For setTimeout functionality; creating events which fire once after at
+-- least a certain amount of time.
+import Control.Concurrent (forkIO, threadDelay)
 import System.IO.Unsafe
 import Unsafe.Coerce
 
@@ -86,9 +91,12 @@ import Unsafe.Coerce
 --
 --   TODO give a way to unbind everything bound by makeUIEnvironment.
 data UIEnvironment = UIEnvironment {
-      uiEnvironmentWindowMousemove :: Event (Int, Int)
-    , uiEnvironmentWindowMouseup :: Event (Int, Int)
-    , uiEnvironmentAnimationFrame :: Event (Double)
+      uiEnvironmentWindowMousemove :: Event MouseEventData
+    , uiEnvironmentWindowMouseup :: Event MouseEventData
+    , uiEnvironmentWindowKeydown :: Event KeydownData
+    , uiEnvironmentWindowKeypress :: Event KeypressData
+    , uiEnvironmentWindowKeyup :: Event KeyupData
+    , uiEnvironmentAnimationFrame :: Event Double
     -- ^ Value is a decimal timestamp in milliseconds with microsecond precision
     }
 
@@ -96,34 +104,48 @@ makeUIEnvironment :: Window -> MomentIO UIEnvironment
 makeUIEnvironment window = do
     mousemove <- windowMousemove window
     mouseup <- windowMouseup window
+    keydown <- windowKeydown window
+    keypress <- windowKeypress window
+    keyup <- windowKeyup window
     animationFrame <- windowAnimationFrame window
-    pure (UIEnvironment mousemove mouseup animationFrame)
+    pure (UIEnvironment mousemove mouseup keydown keypress keyup animationFrame)
   where
-    windowMousemove :: Window -> MomentIO (Event (Int, Int))
+    windowMousemove :: Window -> MomentIO (Event MouseEventData)
     windowMousemove window = do
         (ev, fire) <- newEvent
-        unbind <- liftIO $ on window Window.mouseMove $ do
-            e <- EventM.event
-            x <- liftIO $ getClientX e
-            y <- liftIO $ getClientY e
-            liftIO $ fire (x, y)
-            pure ()
+        _ <- liftIO $ bindElementEvent Mousemove window fire
         pure ev
-    windowMouseup :: Window -> MomentIO (Event (Int, Int))
+    windowMouseup :: Window -> MomentIO (Event MouseEventData)
     windowMouseup window = do
         (ev, fire) <- newEvent
-        unbind <- liftIO $ on window Window.mouseUp $ do
-            e <- EventM.event
-            x <- liftIO $ getClientX e
-            y <- liftIO $ getClientY e
-            liftIO $ fire (x, y)
-            pure ()
+        _ <- liftIO $ bindElementEvent Mouseup window fire
+        pure ev
+    windowKeydown :: Window -> MomentIO (Event KeydownData)
+    windowKeydown window = do
+        (ev, fire) <- newEvent
+        _ <- liftIO $ bindElementEvent Keydown window fire
+        pure ev
+    windowKeypress :: Window -> MomentIO (Event KeypressData)
+    windowKeypress window = do
+        (ev, fire) <- newEvent
+        _ <- liftIO $ bindElementEvent Keypress window fire
+        pure ev
+    windowKeyup :: Window -> MomentIO (Event KeyupData)
+    windowKeyup window = do
+        (ev, fire) <- newEvent
+        _ <- liftIO $ bindElementEvent Keyup window fire
         pure ev
     windowAnimationFrame :: Window -> MomentIO (Event (Double))
     windowAnimationFrame window = do
-        (ev, fire) <- newEvent
+        -- The animation frame is bound again and again; the event will fire
+        -- on every frame for the life of the web page.
+        -- This *should* be no problem, in theory. If there's no work to do
+        -- as a result of the event, then reactive-banana ought to consume
+        -- virtually no resources. But we shall see about this...
+        --
         -- TBD how to implement canceling of the animation frame? Store the
         -- id in a behavior, grab it, cancel it?
+        (ev, fire) <- newEvent
         rec { let cb = \ts -> do
                       Window.requestAnimationFrame window (Just rafCb)
                       fire ts
@@ -138,7 +160,7 @@ makeUIEnvironment window = do
 newtype ElementBuilder (tag :: Symbol) t = ElementBuilder {
       runElementBuilder
           :: ReaderT (UIEnvironment)
-             (StateT (ReadOnlyElement tag)
+             (StateT (UIState tag)
              (WriterT (Dual (Endo ElementSchema))
              MomentIO))
              t
@@ -157,8 +179,8 @@ buildElement
        ( )
     => ElementBuilder tag t
     -> UIEnvironment
-    -> ReadOnlyElement tag
-    -> MomentIO (t, ReadOnlyElement tag, Dual (Endo ElementSchema))
+    -> UIState tag
+    -> MomentIO (t, UIState tag, Dual (Endo ElementSchema))
 buildElement extrinsic env el = do
     ((t, el'), eschemaDualEndo)
         <- runWriterT (runStateT (runReaderT (runElementBuilder extrinsic) env) el)
@@ -170,6 +192,12 @@ liftMomentIO = ElementBuilder . lift . lift . lift
 newtype Child t = Child {
       runChild :: (t, SomeNode, Event (IO ()))
     }
+
+instance Eq (Child t) where
+    Child (_, n, _) == Child (_, m, _) = n == m
+
+instance Ord (Child t) where
+    Child (_, n, _) `compare` Child (_, m, _) = n `compare` m
 
 childData :: Child t -> t
 childData = (\(x,_,_) -> x) . runChild
@@ -186,6 +214,13 @@ childUpdates = (\(_,_,x) -> x) . runChild
 data SetChild t where
     SetWidgetChild :: Either (Child t) (UI t) -> SetChild t
     SetTextChild :: T.Text -> SetChild ()
+
+-- | Two SetChild t values are equal if they hold the same existing child (same
+--   DOM node under JS equality).
+instance Eq (SetChild t) where
+    left == right = case (left, right) of
+        (SetWidgetChild (Left n), SetWidgetChild (Left m)) -> n == m
+        _ -> False
 
 newChild :: UI t -> SetChild t
 newChild = SetWidgetChild . Right
@@ -559,7 +594,7 @@ buildWidget
     -> MomentIO (t, Element, Event (IO ()))
 buildWidget (Widget l mk r) s env document = mdo
     Just el <- document `createElement` Just (w3cTagName (Tag :: Tag tag))
-    let roelem = ReadOnlyElement el M.empty
+    let roelem = UIState el M.empty []
     -- Make a composite ElementBuilder from 3 principal parts of the widget:
     --   the input l
     --   the intrinsic part mk
@@ -587,12 +622,14 @@ buildWidget (Widget l mk r) s env document = mdo
     let eschema = appEndo (getDual eschemaDualEndo)
                 $ emptySchema
     let seqncChildrenIO = reactimateChildren el mutationSequence
+    styleseqnc <- buildSequence (elementSchemaStyle eschema)
     seqncSchemaIO <- runElementSchema eschema document el
     let seqncLocalIO = sequenceUnion (>>) seqncChildrenIO seqncSchemaIO
     let initialLocalIO = sequenceFirst seqncLocalIO
     let evLocalIO = sequenceEvent seqncLocalIO
     let evIO = unionWith (>>) evLocalIO childrenUpdates
     liftIO (wireEvents roelem')
+    liftIOLater (wireTimeouts roelem')
     liftIO initialLocalIO
     pure (t, el, evIO)
 
@@ -618,7 +655,7 @@ reactiveDom
 reactiveDom document parent seqncUi = do
     Just window <- getDefaultView document
     env <- makeUIEnvironment window
-    -- Built the UIs.
+    -- Build the UIs.
     seqncBuilt :: Sequence (t, Element, Event (IO ()))
         <- sequenceCommute (buildUI env document <$> seqncUi)
     -- Output is the first component.
@@ -640,6 +677,10 @@ reactiveDom document parent seqncUi = do
     -- Run the updates.
     evUpdate <- sequenceSwitchE seqncUpdate
     reactimate evUpdate
+    -- The two reactimates found here are the only reactimates performed by
+    -- use of the reactive-dom package. This is important, for there's no way
+    -- to "un-reactimate", so doing local reactimates would result in an
+    -- accumulation of outputs in the network with no upper bound.
     pure seqncT
   where
     renderIt :: Element -> IO ()
@@ -651,52 +692,58 @@ reactiveDom document parent seqncUi = do
 
 -- | For use in ElementBuilder state. Gives access to certain features of
 --   a DOM element and holds deferred event bindings.
-data ReadOnlyElement (tag :: Symbol) = ReadOnlyElement {
-      getReadOnlyElement :: Element
-    , getEvents :: M.Map (DOMString, Bool) (EventBinding tag)
+--
+--   TBD take away the tag parameter? Not used anymore, but doesn't hurt to
+--   leave it.
+data UIState (tag :: Symbol) = UIState {
+      getUIStateElement :: Element
+    , getUIStateEvents :: M.Map (DOMString, Bool) EventBinding
+    , getUIStateTimeouts :: [IO ()]
     }
 
-data EventBinding (tag :: Symbol) where
-    EventBinding
-        :: forall e tag .
-           ( ElementEvent e tag )
-        => e
-        -> Event (EventData e)
-        -> EventM (ElementEventTarget e) (DOMEvent e) Bool
-        -> (EventData e -> IO ())
-        -> EventBinding tag
+wireTimeouts :: UIState tag -> IO ()
+wireTimeouts uistate = sequence_ (fmap forkIO (getUIStateTimeouts uistate))
 
+timeout :: Int -> ElementBuilder tag (Event ())
+timeout i = ElementBuilder $ do
+    (ev, fire) <- (lift . lift . lift) newEvent
+    let fireThread = threadDelay i >> putStrLn "Firing timeout" >> fire ()
+    uistate <- lift get
+    let timeouts = getUIStateTimeouts uistate
+    lift (put (uistate { getUIStateTimeouts = fireThread : timeouts }))
+    pure ev
+
+data EventBinding where
+    EventBinding
+        :: forall e .
+           ( ElementEvent e Element )
+        => e
+        -> Event (EventData e Element)
+        -> EventM Element (DOMEvent e Element) Bool
+        -> (EventData e Element -> IO ())
+        -> EventBinding
+
+-- | TODO clean this up. Many unused parameters.
 runEventBinding
-    :: forall tag .
-       Element
+    :: Element
     -> (DOMString, Bool)
-    -> EventBinding tag
+    -> EventBinding
     -> IO ()
-runEventBinding el (eventName, fireWhenBubbled) (EventBinding e _ eventM fire) = do
-    target <- elementEventTarget e (Proxy :: Proxy tag) el
-    let action = do continue <- eventM
-                    if not continue
-                    then pure ()
-                    else do
-                        domEvent <- EventM.event
-                        d <- liftIO (eventData e (Proxy :: Proxy tag) target domEvent)
-                        liftIO $ setJSProperty domEvent "bubbled" (Just "true")
-                        liftIO $ fire d
-                        pure ()
-    on target (EventName eventName) action
+runEventBinding el _ (EventBinding e _ _ fire) = do
+    bindElementEvent e el fire
     pure ()
 
-wireEvents :: ReadOnlyElement tag -> IO ()
-wireEvents (ReadOnlyElement el eventMap) =
+wireEvents :: UIState tag -> IO ()
+wireEvents (UIState el eventMap _) =
     M.foldWithKey (\k v rest -> runEventBinding el k v >> rest) (pure ()) eventMap
 
 elementEvent
     :: forall event tag .
-       ElementEvent event tag
+       ElementEvent event Element
     => event
-    -> ReadOnlyElement tag
+    -> UIState tag
     -> Bool -- True if it should fire even when bubbled.
-    -> MomentIO (Event (EventData event), ReadOnlyElement tag)
+    -> MomentIO (Event (EventData event Element), UIState tag)
 elementEvent event roelement fireWhenBubbled = case existingBinding of
     -- unsafeCoerce is OK. We know ev must have the right type, because the
     -- only way it could have come to be here is if it was inserted for
@@ -705,14 +752,15 @@ elementEvent event roelement fireWhenBubbled = case existingBinding of
     Nothing -> do
         (ev, fire) <- newEvent
         let binding = EventBinding event ev eventM fire
-        let newEvents = M.alter (const (Just binding)) (key, fireWhenBubbled) (getEvents roelement)
-        pure (ev, roelement { getEvents = newEvents })
+        let newEvents = M.alter (const (Just binding)) (key, fireWhenBubbled) (getUIStateEvents roelement)
+        pure (ev, roelement { getUIStateEvents = newEvents })
   where
-    existingBinding = M.lookup (key, fireWhenBubbled) (getEvents roelement)
-    EventName key = eventName (Proxy :: Proxy event) (Proxy :: Proxy tag)
-    eventM :: EventM Element (DOMEvent event) Bool
-    eventM = specialHandler (Proxy :: Proxy event) (Proxy :: Proxy tag)
+    existingBinding = M.lookup (key, fireWhenBubbled) (getUIStateEvents roelement)
+    EventName key = eventName (Proxy :: Proxy event) (Proxy :: Proxy Element)
+    eventM :: EventM Element (DOMEvent event Element) Bool
+    eventM = specialHandler (Proxy :: Proxy event) (Proxy :: Proxy Element)
 
+{-
 -- | Since we don't want to allow `execute` in ElementBuilder, we offer a
 --   specialized way of using effectful events. Only IOEvents with benign
 --   effects can be obtained.
@@ -728,56 +776,72 @@ ioEvent :: IOEvent (s -> t) -> Event s -> ElementBuilder tag (Event t)
 ioEvent ioevent ev = ElementBuilder $ do
     let io = runIOEvent ioevent
     lift . lift .lift $ (execute (liftIO . (<*>) io . pure <$> ev))
+-}
 
-clientRect :: ElementBuilder tag (IOEvent ClientRect)
+data ClientRect = ClientRect {
+      clientRectTop :: Float
+    , clientRectLeft :: Float
+    , clientRectBottom :: Float
+    , clientRectRight :: Float
+    , clientRectWidth :: Float
+    , clientRectHeight :: Float
+    }
+
+deriving instance Show ClientRect
+
+clientRect :: ElementBuilder tag (Behavior ClientRect)
 clientRect = ElementBuilder $ do
     roelem <- lift get
-    let el = getReadOnlyElement roelem
+    let el = getUIStateElement roelem
     let getIt = do Just rect <- getBoundingClientRect el
-                   pure rect
-    pure (IOEvent getIt)
+                   ClientRect <$> ClientRect.getTop rect
+                              <*> ClientRect.getLeft rect
+                              <*> ClientRect.getBottom rect
+                              <*> ClientRect.getRight rect
+                              <*> ClientRect.getWidth rect
+                              <*> ClientRect.getHeight rect
+    (lift . lift . lift) (fromPull getIt)
 
-clientHeight :: ElementBuilder tag (IOEvent Double)
-clientHeight = ElementBuilder $ do
-    el <- lift get
-    pure (IOEvent (getClientHeight (getReadOnlyElement el)))
-
-clientWidth :: ElementBuilder tag (IOEvent Double)
-clientWidth = ElementBuilder $ do
-    el <- lift get
-    pure (IOEvent (getClientWidth (getReadOnlyElement el)))
-
-offsetHeight :: ElementBuilder tag (IOEvent Double)
-offsetHeight = ElementBuilder $ do
-    el <- lift get
-    pure (IOEvent (getOffsetHeight (getReadOnlyElement el)))
-
-offsetWidth :: ElementBuilder tag (IOEvent Double)
-offsetWidth = ElementBuilder $ do
-    el <- lift get
-    pure (IOEvent (getOffsetWidth (getReadOnlyElement el)))
-
-scrollHeight :: ElementBuilder tag (IOEvent Int)
+scrollHeight :: ElementBuilder tag (Behavior Int)
 scrollHeight = ElementBuilder $ do
     el <- lift get
-    pure (IOEvent (getScrollHeight (getReadOnlyElement el)))
+    (lift . lift . lift) (fromPull (getScrollHeight (getUIStateElement el)))
 
-scrollWidth :: ElementBuilder tag (IOEvent Int)
+scrollWidth :: ElementBuilder tag (Behavior Int)
 scrollWidth = ElementBuilder $ do
     el <- lift get
-    pure (IOEvent (getScrollWidth (getReadOnlyElement el)))
+    (lift . lift . lift) (fromPull (getScrollWidth (getUIStateElement el)))
 
-animationFrame :: forall tag . ElementBuilder tag (Event Double)
-animationFrame = ElementBuilder $ do
-    env <- ask
-    pure (uiEnvironmentAnimationFrame env)
+windowMousemove :: ElementBuilder tag (Event MouseEventData)
+windowMousemove = uiEnvironmentWindowMousemove <$> ElementBuilder ask
 
--- TODO HasEvent tag event
+windowMouseup :: ElementBuilder tag (Event MouseEventData)
+windowMouseup = uiEnvironmentWindowMouseup <$> ElementBuilder ask
+
+windowKeydown :: ElementBuilder tag (Event KeydownData)
+windowKeydown = uiEnvironmentWindowKeydown <$> ElementBuilder ask
+
+windowKeypress :: ElementBuilder tag (Event KeypressData)
+windowKeypress = uiEnvironmentWindowKeypress <$> ElementBuilder ask
+
+windowKeyup :: ElementBuilder tag (Event KeyupData)
+windowKeyup = uiEnvironmentWindowKeyup <$> ElementBuilder ask
+
+animationFrame :: ElementBuilder tag (Event Double)
+animationFrame = uiEnvironmentAnimationFrame <$> ElementBuilder ask
+
+-- | By using event, the tag of the ElementBuilder is constrained, so that if
+--   used as a modifier in a Widget, the Widget can no longer be open.
+--
 event
     :: forall event tag . 
-       ElementEvent event tag
+       ( W3CTag tag
+       -- TODO be more precise than W3CTag. Maybe  ( HasEvent event tag )
+       , ElementEvent event Element
+       -- Must be an event which works on Element.
+       )
     => event
-    -> ElementBuilder tag (Event (EventData event))
+    -> ElementBuilder tag (Event (EventData event Element))
 event ev = ElementBuilder $ do
     roelem <- lift get
     (ev, roelem') <- (lift . lift . lift) (elementEvent ev roelem False)
@@ -785,103 +849,273 @@ event ev = ElementBuilder $ do
     pure ev
 
 class
-    ( PToJSVal (DOMEvent event)
-    , IsEvent (DOMEvent event)
-    , IsEventTarget (ElementEventTarget event)
-    , W3CTag tag
-    ) => ElementEvent event (tag :: Symbol)
+    ( PToJSVal (DOMEvent event target)
+    , IsEvent (DOMEvent event target)
+    , IsEventTarget target
+    ) => ElementEvent event target
   where
-    type EventData event :: *
-    type DOMEvent event :: *
-    type ElementEventTarget event :: *
-    type ElementEventTarget event = Element
-    eventName :: Proxy event -> Proxy tag -> EventName (ElementEventTarget event) (DOMEvent event)
-    eventData :: event -> Proxy tag -> ElementEventTarget event -> DOMEvent event -> IO (EventData event)
+    type EventData event target :: *
+    type DOMEvent event target :: *
+    eventName :: Proxy event -> Proxy target -> EventName target (DOMEvent event target)
+    eventData :: event -> target -> DOMEvent event target -> IO (EventData event target)
     -- In case you need to do special effects in the event handler.
     -- Motivating case: the Submit event *always* prevents the default action.
     -- Without this, the page will reload.
-    specialHandler :: Proxy event -> Proxy tag -> EventM (ElementEventTarget event) (DOMEvent event) Bool
     -- Default special handler: do nothing (return False) if the event is bubbled.
+    specialHandler :: Proxy event -> Proxy target -> EventM target (DOMEvent event target) Bool
     specialHandler e tag = not <$> isBubbled e tag
-    -- The EventTarget for this event must be resolvable from an actual Element.
-    -- Motivating case: drag events actually bind dragover on the document.
-    -- Thus the event target is a document, and we get that target using
-    -- Element.ownerDocument
-    elementEventTarget :: event -> Proxy tag -> Element -> IO (ElementEventTarget event)
 
-isBubbled :: ElementEvent e tag => Proxy e -> Proxy tag -> EventM e (DOMEvent e) Bool
+isBubbled
+    :: ElementEvent event target
+    => Proxy event
+    -> Proxy target
+    -> EventM event (DOMEvent event target) Bool
 isBubbled _ _ = do
     domEvent <- EventM.event
-    -- The "bubbled" property is set in runEventBinding.
+    -- The "bubbled" property is set in bindElementEvent.
     mbubbled <- liftIO $ getJSProperty domEvent "bubbled"
     pure $ case mbubbled of
         Just "true" -> True
         _ -> False
 
+-- | Use an ElementEvent instance to bind a callback (banana event handler
+--   trigger) to an event at some particular target.
+--
+--   Output is an IO to unbind it.
+bindElementEvent
+    :: forall event target .
+       ( ElementEvent event target
+       )
+    => event
+    -> target
+    -> (EventData event target -> IO ())
+    -> IO (IO ())
+bindElementEvent event target fire = do
+    let action = do
+            continue <- eventM
+            if not continue
+            then pure ()
+            else do
+                  domEvent <- EventM.event
+                  d <- liftIO (eventData event target domEvent)
+                  liftIO $ setJSProperty domEvent "bubbled" (Just "true")
+                  liftIO $ fire d
+                  pure ()
+    on target (eventName proxyEvent proxyTarget) action
+  where
+    proxyEvent :: Proxy event
+    proxyEvent = Proxy
+    proxyTarget :: Proxy target
+    proxyTarget = Proxy
+    eventM :: EventM target (DOMEvent event target) Bool
+    eventM = specialHandler proxyEvent proxyTarget
+
+data MouseEventData = MouseEventData {
+      mouseClientX :: Int
+    , mouseClientY :: Int
+    , mouseOffsetX :: Int
+    , mouseOffsetY :: Int
+    }
+
 data Click = Click
-instance W3CTag tag => ElementEvent Click tag where
-    type EventData Click = ()
-    type DOMEvent Click = MouseEvent
+instance ElementEvent Click Element where
+    type EventData Click Element = MouseEventData
+    type DOMEvent Click Element = MouseEvent
     eventName _ _ = Element.click
-    eventData _ _ _ _ = pure ()
-    elementEventTarget _ _ = pure
+    eventData _ _ ev = MouseEventData <$> getClientX ev
+                                      <*> getClientY ev
+                                      <*> getOffsetX ev
+                                      <*> getOffsetY ev
+instance ElementEvent Click Window where
+    type EventData Click Window = MouseEventData
+    type DOMEvent Click Window = MouseEvent
+    eventName _ _ = Window.click
+    eventData _ _ ev = MouseEventData <$> getClientX ev
+                                      <*> getClientY ev
+                                      <*> getOffsetX ev
+                                      <*> getOffsetY ev
 
 data Mousedown = Mousedown
-data MousedownData = MousedownData {
-      mousedownX :: Int
-    , mousedownY :: Int
-    }
-instance W3CTag tag => ElementEvent Mousedown tag where
-    type EventData Mousedown = MousedownData
-    type DOMEvent Mousedown = MouseEvent
+instance ElementEvent Mousedown Element where
+    type EventData Mousedown Element = MouseEventData
+    type DOMEvent Mousedown Element = MouseEvent
     eventName _ _ = Element.mouseDown
-    eventData _ _ _ ev = MousedownData <$> getClientX ev <*> getClientY ev
-    elementEventTarget _ _ = pure
+    eventData _ _ ev = MouseEventData <$> getClientX ev
+                                      <*> getClientY ev
+                                      <*> getOffsetX ev
+                                      <*> getOffsetY ev
+instance ElementEvent Mousedown Window where
+    type EventData Mousedown Window = MouseEventData
+    type DOMEvent Mousedown Window = MouseEvent
+    eventName _ _ = Window.mouseDown
+    eventData _ _ ev = MouseEventData <$> getClientX ev
+                                      <*> getClientY ev
+                                      <*> getOffsetX ev
+                                      <*> getOffsetY ev
+
+data Mouseup = Mouseup
+instance ElementEvent Mouseup Element where
+    type EventData Mouseup Element = MouseEventData
+    type DOMEvent Mouseup Element = MouseEvent
+    eventName _ _ = Element.mouseUp
+    eventData _ _ ev = MouseEventData <$> getClientX ev
+                                      <*> getClientY ev
+                                      <*> getOffsetX ev
+                                      <*> getOffsetY ev
+instance ElementEvent Mouseup Window where
+    type EventData Mouseup Window = MouseEventData
+    type DOMEvent Mouseup Window = MouseEvent
+    eventName _ _ = Window.mouseUp
+    eventData _ _ ev = MouseEventData <$> getClientX ev
+                                      <*> getClientY ev
+                                      <*> getOffsetX ev
+                                      <*> getOffsetY ev
+
+data Mousemove = Mousemove
+instance ElementEvent Mousemove Element where
+    type EventData Mousemove Element = MouseEventData
+    type DOMEvent Mousemove Element = MouseEvent
+    eventName _ _ = Element.mouseMove
+    eventData _ _ ev = MouseEventData <$> getClientX ev
+                                      <*> getClientY ev
+                                      <*> getOffsetX ev
+                                      <*> getOffsetY ev
+instance ElementEvent Mousemove Window where
+    type EventData Mousemove Window = MouseEventData
+    type DOMEvent Mousemove Window = MouseEvent
+    eventName _ _ = Window.mouseMove
+    eventData _ _ ev = MouseEventData <$> getClientX ev
+                                      <*> getClientY ev
+                                      <*> getOffsetX ev
+                                      <*> getOffsetY ev
+
+
 
 data Mouseenter = Mouseenter
-instance W3CTag tag => ElementEvent Mouseenter tag where
-    type EventData Mouseenter = ()
-    type DOMEvent Mouseenter = MouseEvent
+instance ElementEvent Mouseenter Element where
+    type EventData Mouseenter Element = MouseEventData
+    type DOMEvent Mouseenter Element = MouseEvent
     eventName _ _ = Element.mouseEnter
-    eventData _ _ _ _ = pure ()
-    elementEventTarget _ _ = pure
+    eventData _ _ ev = MouseEventData <$> getClientX ev
+                                      <*> getClientY ev
+                                      <*> getOffsetX ev
+                                      <*> getOffsetY ev
+instance ElementEvent Mouseenter Window where
+    type EventData Mouseenter Window = MouseEventData
+    type DOMEvent Mouseenter Window = MouseEvent
+    eventName _ _ = Window.mouseEnter
+    eventData _ _ ev = MouseEventData <$> getClientX ev
+                                      <*> getClientY ev
+                                      <*> getOffsetX ev
+                                      <*> getOffsetY ev
 
 data Mouseleave = Mouseleave
-instance W3CTag tag => ElementEvent Mouseleave tag where
-    type EventData Mouseleave = ()
-    type DOMEvent Mouseleave = MouseEvent
+instance ElementEvent Mouseleave Element where
+    type EventData Mouseleave Element = MouseEventData
+    type DOMEvent Mouseleave Element = MouseEvent
     eventName _ _ = Element.mouseLeave
-    eventData _ _ _ _ = pure ()
-    elementEventTarget _ _ = pure
+    eventData _ _ ev = MouseEventData <$> getClientX ev
+                                      <*> getClientY ev
+                                      <*> getOffsetX ev
+                                      <*> getOffsetY ev
+instance ElementEvent Mouseleave Window where
+    type EventData Mouseleave Window = MouseEventData
+    type DOMEvent Mouseleave Window = MouseEvent
+    eventName _ _ = Window.mouseLeave
+    eventData _ _ ev = MouseEventData <$> getClientX ev
+                                      <*> getClientY ev
+                                      <*> getOffsetX ev
+                                      <*> getOffsetY ev
+
+data Keypress = Keypress
+data KeypressData = KeypressData {
+      keypressDataKeycode :: Int
+    , keypressDataKey :: T.Text
+    }
+instance ElementEvent Keypress Element where
+    type EventData Keypress Element = KeypressData
+    type DOMEvent Keypress Element = KeyboardEvent
+    eventName _ _ = Element.keyPress
+    eventData _ _ ev = KeypressData <$> getKeyCode ev <*> getKey ev
+instance ElementEvent Keypress Window where
+    type EventData Keypress Window = KeypressData
+    type DOMEvent Keypress Window = KeyboardEvent
+    eventName _ _ = Window.keyPress
+    eventData _ _ ev = KeypressData <$> getKeyCode ev <*> getKey ev
+
+data Keydown = Keydown
+data KeydownData = KeydownData {
+      keydownDataKeycode :: Int
+    , keydownDataKey :: T.Text
+    }
+instance ElementEvent Keydown Element where
+    type EventData Keydown Element = KeydownData
+    type DOMEvent Keydown Element = KeyboardEvent
+    eventName _ _ = Element.keyDown
+    eventData _ _ ev = KeydownData <$> getKeyCode ev <*> getKey ev
+instance ElementEvent Keydown Window where
+    type EventData Keydown Window = KeydownData
+    type DOMEvent Keydown Window = KeyboardEvent
+    eventName _ _ = Window.keyDown
+    eventData _ _ ev = KeydownData <$> getKeyCode ev <*> getKey ev
+
+data Keyup = Keyup
+data KeyupData = KeyupData {
+      keyupDataKeycode :: Int
+    , keyupDataKey :: T.Text
+    }
+instance ElementEvent Keyup Element where
+    type EventData Keyup Element = KeyupData
+    type DOMEvent Keyup Element = KeyboardEvent
+    eventName _ _ = Element.keyUp
+    eventData _ _ ev = KeyupData <$> getKeyCode ev <*> getKey ev
+instance ElementEvent Keyup Window where
+    type EventData Keyup Window = KeyupData
+    type DOMEvent Keyup Window = KeyboardEvent
+    eventName _ _ = Window.keyUp
+    eventData _ _ ev = KeyupData <$> getKeyCode ev <*> getKey ev
+
+-- Seems ghcjs-dom does not offer a getter for the 'key' property of
+-- KeyboardEvent
+foreign import javascript safe "$1[\"key\"]" js_getKey :: UIEvent -> IO JSString
+getKey :: KeyboardEvent -> IO T.Text
+getKey ev = textFromJSString <$> js_getKey (toUIEvent ev)
 
 data Submit = Submit
-instance ElementEvent Submit "form" where
-    type EventData Submit = ()
-    type DOMEvent Submit = DOM.Types.Event
+instance ElementEvent Submit Element where
+    type EventData Submit Element = ()
+    type DOMEvent Submit Element = DOM.Types.Event
     eventName _ _ = Element.submit
-    eventData _ _ _ _ = pure ()
-    elementEventTarget _ _ = pure
+    eventData _ _ _ = pure ()
     specialHandler e t = preventDefault >> (not <$> isBubbled e t)
 
 data Input = Input
-instance ElementEvent Input "input" where
-    type EventData Input = T.Text
-    type DOMEvent Input = DOM.Types.Event
+instance ElementEvent Input Element where
+    type EventData Input Element = T.Text
+    type DOMEvent Input Element = DOM.Types.Event
     eventName _ _ = Element.input
-    eventData _ _ el _ = maybe "" id <$> getValue (castToHTMLInputElement el)
-    elementEventTarget _ _ = pure
+    eventData _ el _ = maybe "" id <$> getValue (castToHTMLInputElement el)
 
 data Scroll = Scroll
 data ScrollData = ScrollData {
       scrollDataTop :: Int
     , scrollDataLeft :: Int
     }
-instance W3CTag tag => ElementEvent Scroll tag where
-    type EventData Scroll = ScrollData
-    type DOMEvent Scroll = DOM.Types.UIEvent
+instance ElementEvent Scroll Element where
+    type EventData Scroll Element = ScrollData
+    type DOMEvent Scroll Element = DOM.Types.UIEvent
     eventName _ _ = Element.scroll
-    eventData _ _ el _ = ScrollData <$> getScrollTop el <*> getScrollLeft el
+    eventData _ el _ = ScrollData <$> getScrollTop el <*> getScrollLeft el
+
+{-
+data Transitioned
+instance W3CTag tag => ElementEvent Transitioned tag where
+    type EventData Transitioned = ()
+    type DOMEvent Transitioned = DOM.Types.TransitionEvent
+    eventName _ _ = unsafeEventName (toJSString ("transitioned" :: T.Text))
+    eventData _ _ _ _ = pure ()
     elementEventTarget _ _ = pure
+-}
 
 {-
 data Pull = Pull
@@ -966,31 +1200,29 @@ data TouchStart = TouchStart
 data TouchStartData = TouchStartData {
       touchStartChangedTouches :: HM.HashMap Int (Int, Int)
     }
-instance W3CTag tag => ElementEvent TouchStart tag where
-    type EventData TouchStart = TouchStartData
-    type DOMEvent TouchStart = DOM.Types.TouchEvent
+instance ElementEvent TouchStart Element where
+    type EventData TouchStart Element = TouchStartData
+    type DOMEvent TouchStart Element = DOM.Types.TouchEvent
     eventName _ _ = Element.touchStart
-    eventData TouchStart _ _ ev = do
+    eventData TouchStart _ ev = do
         Just cts <- getChangedTouches ev
         hm <- elimTouchList cts
         pure (TouchStartData hm)
-    elementEventTarget _ _ = pure
 
 data TouchMove = TouchMove
 data TouchMoveData = TouchMoveData {
       touchMoveChangedTouches :: HM.HashMap Int (Int, Int)
     }
-instance W3CTag tag => ElementEvent TouchMove tag where
-    type EventData TouchMove = TouchMoveData
-    type DOMEvent TouchMove = DOM.Types.TouchEvent
+instance ElementEvent TouchMove Element where
+    type EventData TouchMove Element = TouchMoveData
+    type DOMEvent TouchMove Element = DOM.Types.TouchEvent
     eventName _ _ = Element.touchMove
-    eventData TouchMove _ _ ev = do
+    eventData TouchMove _ ev = do
         Just cts <- getChangedTouches ev
         hm <- elimTouchList cts
         pure (TouchMoveData hm)
     -- TODO should be optional, no?
     specialHandler e t = preventDefault >> (not <$> isBubbled e t)
-    elementEventTarget _ _ = pure
 
 -- | Make a hashmap giving client x/y coordinates of each touch, eliminating
 --   the TouchList (and its IO-only interface).
@@ -1022,10 +1254,12 @@ touchPull = modifier $ \_ -> do
     -- the mouse leaves the browser window), and of course the element's
     -- mousedown event to determine when to start the pull.
     evMousedown <- event Mousedown
-    let evPullStartCoords = (\x -> (mousedownX x, mousedownY x)) <$> evMousedown
+    let evPullStartCoords = (\x -> (mouseClientX x, mouseClientY x)) <$> evMousedown
     env <- ElementBuilder ask
-    let wmm = uiEnvironmentWindowMousemove env
-    let wmu = uiEnvironmentWindowMouseup env
+    let getClientCoords :: MouseEventData -> (Int, Int)
+        getClientCoords md = (mouseClientX md, mouseClientY md)
+    let wmm = getClientCoords <$> uiEnvironmentWindowMousemove env
+    let wmu = getClientCoords <$> uiEnvironmentWindowMouseup env
     -- Must know when to actually fire the pull events: only between element
     -- mousedown and window mouseup.
     let openGate = const True <$> evMousedown
@@ -1108,16 +1342,19 @@ runAction action = Endo $ case action of
     NoOp -> id
 
 newtype Style = Style { getStyle :: IdentifiedMap T.Text T.Text }
+deriving instance Show Style
 deriving instance Eq Style
 deriving instance Semigroup Style
 deriving instance Monoid Style
 
 newtype Properties = Properties { getProperties :: IdentifiedMap T.Text T.Text }
+deriving instance Show Properties
 deriving instance Eq Properties
 deriving instance Semigroup Properties
 deriving instance Monoid Properties
 
 newtype Attributes = Attributes { getAttributes :: IdentifiedMap T.Text T.Text }
+deriving instance Show Attributes
 deriving instance Eq Attributes
 deriving instance Semigroup Attributes
 deriving instance Monoid Attributes
@@ -1436,8 +1673,7 @@ style'
 style' s = ElementBuilder $ (lift . lift) (tell (Dual (Endo (schemaStyle s))))
 
 styleHover
-    :: ( ElementEvent Mouseenter tag
-       , ElementEvent Mouseleave tag
+    :: ( W3CTag tag
        )
     => Style
     -> ElementBuilder tag ()

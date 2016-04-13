@@ -47,14 +47,20 @@ module Reactive.DOM.Node (
     , newChild
     , existingChild
     , textChild
-    , IOEvent
-    , ioEvent
-    , clientHeight
-    , clientWidth
+    , ClientRect(..)
+    , clientRect
     , scrollHeight
     , scrollWidth
+    , UIEnvironment
+    , windowMousemove
+    , windowMouseup
+    , windowKeydown
+    , windowKeypress
+    , windowKeyup
+    , animationFrame
     , ElementEvent
     , event
+    , MouseEventData(..)
     , Click(..)
     , Submit(..)
     , Input(..)
@@ -62,6 +68,12 @@ module Reactive.DOM.Node (
     , Mouseleave(..)
     , Scroll(..)
     , ScrollData(..)
+    , Keydown(..)
+    , KeydownData(..)
+    , Keypress(..)
+    , KeypressData(..)
+    , Keyup(..)
+    , KeyupData(..)
     , Modifier
     , modifier
     , modify
@@ -95,6 +107,7 @@ module Reactive.DOM.Node (
     -- , module Reactive.DOM.Children.Cardinality
 
     , touchPull
+    , timeout
 
     ) where
 
