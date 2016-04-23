@@ -58,6 +58,7 @@ module Reactive.DOM.Node (
     , windowKeypress
     , windowKeyup
     , animationFrame
+    , requestAnimationFrame
     , ElementEvent
     , event
     , MouseEventData(..)
