@@ -1,5 +1,5 @@
 {-|
-Module      : Reactive.DOM.WebApp
+Module      : Reactive.DOM.Flow.WebApp
 Description : Types and functions for defining single-page web apps.
 Copyright   : (c) Alexander Vieth, 2016
 Licence     : BSD3
@@ -24,7 +24,7 @@ Portability : non-portable (GHC only)
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE OverloadedStrings #-}
 
-module Reactive.DOM.WebApp (
+module Reactive.DOM.Flow.WebApp (
 
       Root
     , Piece
@@ -69,11 +69,13 @@ import Data.Algebraic.Product
 import Data.List (intersperse)
 import qualified Data.Text as T
 import Data.IORef
+import Data.Union
+import Data.Transition
 import Reactive.Banana.Combinators
 import Reactive.Banana.Frameworks
 import Reactive.Sequence
 import Reactive.DOM.Node
-import Reactive.DOM.WidgetFlow
+import Reactive.DOM.Flow
 import GHCJS.Types
 import GHCJS.Marshal.Pure
 import GHCJS.DOM

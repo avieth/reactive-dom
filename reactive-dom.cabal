@@ -23,10 +23,11 @@ library
                      , Reactive.DOM.Children.NodeList
                      , Reactive.DOM.Children.MonotoneList
                      , Reactive.DOM.Flow
+                     , Reactive.DOM.Flow.Directed
+                     , Reactive.DOM.Flow.WebApp
                      , Reactive.DOM.Window
                      , Reactive.DOM.Xhr
                      , Reactive.DOM.Geolocation
-                     , Reactive.DOM.WebApp
                      , Reactive.DOM.Style
                      , Reactive.DOM.Widget.Common
                      , Reactive.DOM.Widget.List
@@ -34,11 +35,12 @@ library
                      , Reactive.DOM.Widget.Paginator
                      , Reactive.DOM.Widget.Tabular
                      , Reactive.DOM.Widget.OneOf
-                     , Control.Arrow.ReactiveState
+                     , Control.Arrow.Flow
+                     , Data.Union
+                     , Data.Transition
 
   other-modules:       Reactive.DOM.Internal.Node
                      , Reactive.DOM.Internal.Tag
-                     , Reactive.DOM.Internal.Flow
                      , Reactive.DOM.Internal.ChildrenContainer
                      , Reactive.DOM.Internal.Mutation
 
@@ -70,6 +72,7 @@ library
                      , http-api-data
                      , TypeNat
                      , unordered-containers
+                     , time
 
   -- hs-source-dirs:      
   default-language:    Haskell2010
