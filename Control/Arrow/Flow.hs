@@ -19,14 +19,17 @@ module Control.Arrow.Flow (
 
       Flow(..)
     , FlowContinuation(..)
+    , elimFlowContinuation
     , flowContinuationSingle
     , flowContinuationTrans
     , flowContinuationTrans'
+    , modifyFlowContinuation
     , runFlowContinuation
     , FlowTrans
     , flowTrans
-    , FlowKleisli
-    , flowKleisli
+    , KleisliFlow
+    , KleisliFlowTransformation
+    , kleisliFlow
     , continueFlow
     , runFlow
 
@@ -36,6 +39,8 @@ import Prelude hiding ((.), id)
 import Control.Category
 import Control.Arrow
 import Data.Profunctor
+
+import Data.Functor.Compose
 
 -- | A formal ArrowApply/ArrowChoice with parameterized primitive terms.
 data Flow (m :: * -> * -> *) (s :: *) (t :: *) where
@@ -107,6 +112,15 @@ instance Functor n => Monad (FlowContinuation n) where
                 k' = flip (>>=) k
             in  FlowNext (k' <$> nx)
 
+elimFlowContinuation
+    :: (t -> r)
+    -> (n (FlowContinuation n t) -> r)
+    -> FlowContinuation n t
+    -> r
+elimFlowContinuation done next term = case term of
+    FlowDone t -> done t
+    FlowNext n -> next n
+
 flowContinuationSingle :: Functor n => n t -> FlowContinuation n t
 flowContinuationSingle n = FlowNext (fmap FlowDone n)
 
@@ -121,15 +135,28 @@ flowContinuationTrans f term = case term of
     FlowDone t -> FlowDone t
     FlowNext n -> FlowNext (fmap (flowContinuationTrans f) (f n))
 
+-- | Change the functor part of a FlowContinuation with the next
+--   FlowContinuation in scope.
 flowContinuationTrans'
     :: forall n m t .
        ( Functor m )
-    => (forall t p . n (FlowContinuation p t) -> m (FlowContinuation p t))
+    => (forall t . n (FlowContinuation n t) -> m (FlowContinuation n t))
     -> FlowContinuation n t
     -> FlowContinuation m t
 flowContinuationTrans' trans term = case term of
     FlowDone t -> FlowDone t
     FlowNext n -> FlowNext (fmap (flowContinuationTrans' trans) (trans n))
+
+-- | Compute on the FlowNext parts of the FlowContinuation.
+modifyFlowContinuation
+    :: forall n m t .
+       ( )
+    => (forall t . n (FlowContinuation n t) -> FlowContinuation m t)
+    -> FlowContinuation n t
+    -> FlowContinuation m t
+modifyFlowContinuation trans term = case term of
+    FlowDone t -> FlowDone t
+    FlowNext n -> trans n
 
 -- | A formal Flow over an ArrowApply with ArrowChoice can be moved into that
 --   Arrow. This one is in a continuation-passing form. See also runFlow.
@@ -161,13 +188,15 @@ runFlow
     -> n s t
 runFlow = flip continueFlow id
 
-type FlowKleisli n = Kleisli (FlowContinuation n)
+type KleisliFlow n = Kleisli (FlowContinuation n)
 
-flowKleisli
+kleisliFlow
     :: ( Functor n )
-    => (forall s t . m s t -> s -> n t)
-    -> FlowTrans m (FlowKleisli n)
-flowKleisli f = \m -> Kleisli $ \s -> FlowNext (fmap FlowDone (f m s))
+    => KleisliFlowTransformation m n
+    -> FlowTrans m (KleisliFlow n)
+kleisliFlow f = \m -> Kleisli $ \s -> FlowNext (fmap FlowDone (f m s))
+
+type KleisliFlowTransformation m n = forall s t . m s t -> s -> n t
 
 runFlowContinuation :: Monad n => FlowContinuation n t -> n t
 runFlowContinuation (FlowDone t) = pure t

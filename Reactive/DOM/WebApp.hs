@@ -26,33 +26,34 @@ Portability : non-portable (GHC only)
 
 module Reactive.DOM.WebApp (
 
-      WebApp(..)
-    , WebAppFlow
-    , webApp
-    , webAppFlow
-    , webAppFlow_
-    , webAppGetState
-    , webAppPutState
-    , webAppModifyState
-    , webAppEnv
-    , embedWebAppFlow
-    , jumpTo
-    , getUrl
-    , liftFlowF
-    , Router
-    , Root
+      Root
     , Piece
     , Capture
-    , type (:</>)
-    , (:<|>)(..)
-    --, WebAppFlowExplicit
-    --, alterWebAppFlowExplicit
-    --, RouterStructure(..)
-    --, MakeRouterStructure
-    --, makeRouterStructure
-    --, MakeRouter
-    --, makeRouter
-    --, start
+    , (:</>)
+    , Route(..)
+    , IsRoute
+    , RouterStructure
+    , Router
+    , MakeRouter
+    , makeRouter
+    , (:<|>)
+    , HasRoute
+    , getRoute
+    , MatchRoute
+    , matchRoute
+
+    , WebAppM(..)
+    , WebAppN(..)
+    , wa
+    , jumpTo
+    , dischargeWebAppM
+    , dischargeWebAppN
+
+    , routeUrl
+
+    , WebAppTransition
+
+    , standardWebApp
 
     ) where
 
@@ -60,124 +61,32 @@ import Prelude hiding ((.), id, div)
 import GHC.TypeLits (Symbol, KnownSymbol, symbolVal)
 import Control.Category
 import Control.Arrow
-import Control.Arrow.Operations
---import Control.Arrow.Transformer.State
-import Control.Arrow.ReactiveState
-import Control.Arrow.Transformer.Reader
+import Control.Arrow.Flow
+import Control.Monad (join, (>=>))
 import Data.Void
 import Data.Proxy
-import Data.Profunctor
 import Data.Algebraic.Product
 import Data.List (intersperse)
-import Data.Semigroup
 import qualified Data.Text as T
+import Data.IORef
 import Reactive.Banana.Combinators
 import Reactive.Banana.Frameworks
 import Reactive.Sequence
 import Reactive.DOM.Node
-import Reactive.DOM.Flow
-import Reactive.DOM.Style
-import Reactive.DOM.Children.Single
-import Reactive.DOM.Widget.Common
+import Reactive.DOM.WidgetFlow
 import GHCJS.Types
+import GHCJS.Marshal.Pure
 import GHCJS.DOM
 import GHCJS.DOM.Window hiding (error, print, getWindow)
 import GHCJS.DOM.Document (getBody)
 import GHCJS.DOM.Location (getPathname)
-import qualified GHCJS.DOM.Location as Location
 import GHCJS.DOM.History
-import GHCJS.DOM.EventM
+import GHCJS.DOM.EventM hiding (event)
+import qualified GHCJS.DOM.EventM as EventM
+import GHCJS.DOM.PopStateEvent hiding (getState)
+import qualified GHCJS.DOM.PopStateEvent as PopStateEvent
 import Data.JSString.Text
 import Web.HttpApiData
-
--- | A Flow () s t with a DOM Window and some router hidden under a reader.
---   Those data are necessary to manipulate browser history state and to
---   resolve type-level strings to other Flows.
-newtype WebAppFlowExplicit router env state o s t = WebAppFlowExplicit {
-      runWebAppFlowExplicit
-          :: ReaderArrow ( Window
-                         , Router router env state
-                         , env
-                         )
-                         (ReactiveStateArrow state (Flow o)) s t
-    }
-
-instance Profunctor (WebAppFlowExplicit router env state o) where
-    dimap l r waflow = arr l >>> waflow >>> arr r
-instance Functor (WebAppFlowExplicit router env state o s) where
-    fmap = rmap
-deriving instance Category (WebAppFlowExplicit router env state o)
-deriving instance Arrow (WebAppFlowExplicit router env state o)
-deriving instance ArrowChoice (WebAppFlowExplicit router env state o)
-
-instance ArrowApply (WebAppFlowExplicit router env state o) where
-    app = WebAppFlowExplicit $ proc (flow, s) -> do
-              app -< (runWebAppFlowExplicit flow, s)
-
-instance ArrowReader env (WebAppFlowExplicit router env state o) where
-    readState = WebAppFlowExplicit $ proc x -> do
-        (_, _, x) <- readState -< x
-        returnA -< x
-    newReader flow = WebAppFlowExplicit $ proc (x, r) -> do
-        runWebAppFlowExplicit flow -< x
-
-{-
--- TODO can we get this? I don't think so. Solution may be instead to
--- parameterize experience flow on an Event t -> Moment (Event t)
-liftFlowF'
-    :: (Flow o1 s1 t1 -> Flow o2 s2 t2)
-    -> WebAppFlowExplicit router env state o1 s1 t1
-    -> WebAppFlowExplicit router env state o2 s2 t2
-liftFlowF' f waflow = undefined
--}
-
-liftFlowF
-    :: (forall s t . Flow o1 s t -> Flow o2 s t)
-    -> WebAppFlowExplicit router env state o1 s t
-    -> WebAppFlowExplicit router env state o2 s t
-liftFlowF f = WebAppFlowExplicit . ReaderArrow . ReactiveStateArrow . f . runReactiveStateArrow . runReader . runWebAppFlowExplicit
-
--- DO NOT EXPORT
-getWindow :: WebAppFlowExplicit router env state o () Window
-getWindow = WebAppFlowExplicit $ proc () -> do
-    (w,_,_) <- readState -< ()
-    returnA -< w
-
--- DO NOT EXPORT
-getOrigin :: WebAppFlowExplicit router env state o () T.Text
-getOrigin = proc () -> do
-    window <- getWindow -< ()
-    Just location <- webAppFlow_ . impureFlow $ getLocation -< window
-    webAppFlow_ . impureFlow $ Location.getOrigin -< location
-
--- DO NOT EXPORT
-getRouter :: WebAppFlowExplicit router env state o () (Router router env state)
-getRouter = WebAppFlowExplicit $ proc () -> do
-    (_,r,_) <- readState -< ()
-    returnA -< r
-
-webAppGetState :: WebAppFlowExplicit router env state o anything state
-webAppGetState = WebAppFlowExplicit (liftReader reactiveStateArrowGet)
-
-webAppPutState :: WebAppFlowExplicit router env state o state ()
-webAppPutState = WebAppFlowExplicit (liftReader reactiveStateArrowPut)
-
-webAppModifyState :: WebAppFlowExplicit router env state o (state -> state) state
-webAppModifyState = WebAppFlowExplicit (liftReader reactiveStateArrowModify)
-
-webAppEnv :: WebAppFlowExplicit router env state o anything env
-webAppEnv = readState
-
-webAppFlow_ :: Flow o s t -> WebAppFlowExplicit router env state o s t
-webAppFlow_ = WebAppFlowExplicit . liftReader . statelessArrow
-
-webAppFlow :: Flow o (s, env, state) (t, state) -> WebAppFlowExplicit router env state o s t
-webAppFlow flow = proc s -> do
-    env <- readState -< ()
-    state <- webAppGetState -< ()
-    (t, state) <- WebAppFlowExplicit (liftReader (statelessArrow flow)) -< (s, env, state)
-    _ <- webAppPutState -< state
-    returnA -< t
 
 -- Types for defining individual routes: sequences of static and variable
 -- parts separated by :</> or just Root.
@@ -187,12 +96,15 @@ data Capture (t :: *)
 infixr 1 :</>
 data left :</> right
 
+-- | Proxy for a Route.
+data Route (route :: *) = Route
+
 -- | The input to the route is discovered from its type-level form.
 --   Every Capture t induces a t term in a Data.Algebraic.Product type.
 class IsRoute route where
     type RouteInput route :: *
-    routePathParts :: Proxy route -> RouteInput route -> [T.Text]
-    matchRoutePath :: Proxy route -> [T.Text] -> Maybe (RouteInput route)
+    routePathParts :: Route route -> RouteInput route -> [T.Text]
+    matchRoutePath :: Route route -> [T.Text] -> Maybe (RouteInput route)
 
 instance IsRoute Root where
     type RouteInput Root = ()
@@ -207,10 +119,10 @@ instance
     ) => IsRoute (Piece name :</> rest)
   where
     type RouteInput (Piece name :</> rest) = RouteInput rest
-    routePathParts _ input = T.pack (symbolVal (Proxy :: Proxy name)) : routePathParts (Proxy :: Proxy rest) input
+    routePathParts _ input = T.pack (symbolVal (Proxy :: Proxy name)) : routePathParts (Route :: Route rest) input
     matchRoutePath _ ts = case ts of
         t : rest -> if t == T.pack (symbolVal (Proxy :: Proxy name))
-                    then matchRoutePath (Proxy :: Proxy rest) rest
+                    then matchRoutePath (Route :: Route rest) rest
                     else Nothing
         _ -> Nothing
 
@@ -221,137 +133,185 @@ instance
     ) => IsRoute (Capture t :</> rest)
   where
     type RouteInput (Capture t :</> rest) = t :*: RouteInput rest
-    routePathParts _ (t :*: rest) = toUrlPiece t : routePathParts (Proxy :: Proxy rest) rest
+    routePathParts _ (t :*: rest) = toUrlPiece t : routePathParts (Route :: Route rest) rest
     matchRoutePath _ txts = case txts of
         txt : rest -> case parseUrlPiece txt of
-            Right t -> (.*.) <$> pure t <*> matchRoutePath (Proxy :: Proxy rest) rest
+            Right t -> (.*.) <$> pure t <*> matchRoutePath (Route :: Route rest) rest
             Left _ -> Nothing
         _ -> Nothing
 
-data RouterStructure router env state routesSoFar where
+data RouterStructure (a :: * -> * -> *) router routesSoFar where
     RouterStructureSingle
-        :: Proxy route
-        -> WebAppFlowExplicit router env state o (RouteInput route) Void
-        -> RouterStructure router env state route
+        :: Route route
+        -> Flow (WebAppM router a) (RouteInput route) Void
+        -> RouterStructure a router (Route route)
     RouterStructureCons
-        :: Proxy route
-        -> WebAppFlowExplicit router env state o (RouteInput route) Void
-        -> RouterStructure router env state routesSoFar
-        -> RouterStructure router env state (route :<|> routesSoFar)
+        :: Route route
+        -> Flow (WebAppM router a) (RouteInput route) Void
+        -> RouterStructure a router routesSoFar
+        -> RouterStructure a router (Route route :<|> routesSoFar)
 
-type Router router env state = RouterStructure router env state router
+type Router a router = RouterStructure a router router
 
 infixr 1 :<|>
 data left :<|> right = left :<|> right
 
-class MakeRouterStructure router env state routes thing where
+class MakeRouterStructure a router routes thing where
     makeRouterStructure
-        :: Proxy router
-        -> Proxy env
-        -> Proxy state
+        :: Proxy a
+        -> Proxy router
+        -> Proxy routes
         -> thing
-        -> RouterStructure router env state routes
+        -> RouterStructure a router routes
 
 instance
     ( RouteInput route ~ s
-    ) => MakeRouterStructure router env state route (WebAppFlowExplicit router env state o s Void)
+    ) => MakeRouterStructure a router (Route route) (Flow (WebAppM router a) s Void)
   where
-    makeRouterStructure _ _ _ waflow = RouterStructureSingle Proxy waflow
+    makeRouterStructure _ _ _ flow =
+        RouterStructureSingle (Route :: Route route) flow
 
 instance {-# OVERLAPS #-}
-    ( MakeRouterStructure router env state routes rest
+    ( MakeRouterStructure a router routes rest
     , RouteInput route ~ s
-    ) => MakeRouterStructure router env state (route :<|> routes) (WebAppFlowExplicit router env state o s Void :<|> rest)
+    ) => MakeRouterStructure a router (Route route :<|> routes) (Flow (WebAppM router a) s Void :<|> rest)
   where
-    makeRouterStructure router env state (waflow :<|> rest) =
-        RouterStructureCons Proxy waflow (makeRouterStructure router env state rest)
+    makeRouterStructure a router route (flow :<|> rest) =
+        RouterStructureCons (Route :: Route route) flow (makeRouterStructure a router (Proxy :: Proxy routes) rest)
 
-class MakeRouter router env state routes where
+class MakeRouter a router thing where
     makeRouter
-        :: Proxy router
-        -> Proxy env
-        -> Proxy state
-        -> routes
-        -> Router router env state
+        :: Proxy a
+        -> Proxy router
+        -> thing
+        -> Router a router
 
 instance
-    ( MakeRouterStructure router env state router thing
-    ) => MakeRouter router env state thing
+    ( MakeRouterStructure a router router thing
+    ) => MakeRouter a router thing
   where
-    makeRouter = makeRouterStructure
+    makeRouter a router = makeRouterStructure a router router
 
-
-class HasRoute router env state routes route where
+class HasRoute a router routes route where
     getRoute
-        :: RouterStructure router env state routes
-        -> Proxy route
-        -> forall o . WebAppFlowExplicit router env state o (RouteInput route) Void
+        :: RouterStructure a router routes
+        -> Route route
+        -> Flow (WebAppM router a) (RouteInput route) Void
 
 instance
     (
-    ) => HasRoute router env state route route
+    ) => HasRoute a router (Route route) route
   where
-    -- Must use flowTrans to kill the side-channel value, for
-    -- RouterStructureSingle hides it.
-    -- Consequently, we cannot observe a side-channel for a web app flow which
-    -- is discovered from a router.
-    getRoute (RouterStructureSingle _ waflow) _ = liftFlowF (flowTrans (const (pure Nothing))) waflow
+    getRoute (RouterStructureSingle _ flow) _ = flow
 
 instance {-# OVERLAPS #-}
     (
-    ) => HasRoute router env state (route :<|> routes) route
+    ) => HasRoute a router (Route route :<|> routes) route
   where
-    getRoute (RouterStructureCons _ waflow _) _ = liftFlowF (flowTrans (const (pure Nothing))) waflow
+    getRoute (RouterStructureCons _ flow _) _ = flow
 
 instance {-# OVERLAPS #-}
-    ( HasRoute router env state routes route
-    ) => HasRoute router env state (route' :<|> routes) route
+    ( HasRoute a router routes route
+    ) => HasRoute a router (Route route' :<|> routes) route
   where
     getRoute (RouterStructureCons _ _ rest) route = getRoute rest route
 
-class MatchRoute router env state routes where
+class MatchRoute a router routes where
     matchRoute
-        :: RouterStructure router env state routes
+        :: RouterStructure a router routes
         -> [T.Text]
-        -> forall o . Maybe (WebAppFlowExplicit router env state o () Void)
+        -> Maybe (Flow (WebAppM router a) () Void)
 
-instance IsRoute route => MatchRoute router env state route where
-    matchRoute (RouterStructureSingle route waflow) txts =
+instance (IsRoute route) => MatchRoute a router (Route route) where
+    matchRoute (RouterStructureSingle route flowPiece) txts =
         case matchRoutePath route txts of
-            Just input -> Just (arr (const input) >>> liftFlowF (flowTrans (const (pure Nothing))) waflow)
+            Just input -> Just (arr (const input) >>> flowPiece)
             Nothing -> Nothing
 
 instance {-# OVERLAPS #-}
-    ( MatchRoute router env state routes
+    ( MatchRoute a router routes
     , IsRoute route
-    ) => MatchRoute router env state (route :<|> routes)
+    ) => MatchRoute a router (Route route :<|> routes)
   where
-    matchRoute (RouterStructureCons route waflow rest) txts =
+    matchRoute (RouterStructureCons route flowPiece rest) txts =
         case matchRoutePath route txts of
-            Just input -> Just (arr (const input) >>> liftFlowF (flowTrans (const (pure Nothing))) waflow)
+            Just input -> Just (arr (const input) >>> flowPiece)
             Nothing -> matchRoute rest txts
 
--- Kick off a flow using a Window object, from which the browser's navigation
--- bar's path name is retrieved.
--- It's intended that this be used on page load, and on history pop/push events.
--- From these ingredients a Sequence (Flow o () Void) may be derived, and
--- from that we can derive children of a widget.
-start
-    :: ( MatchRoute router env state router )
-    => Proxy router
-    -> WebAppFlowExplicit router env state o () Void
-    -> WebAppFlowExplicit router env state o () Void
-start _ notFound = proc () -> do
-    window <- getWindow -< ()
-    router <- getRouter -< ()
-    pathParts <- webAppFlow_ getPathParts -< window
-    let match = matchRoute router pathParts
-    case match of
-        Nothing -> do notFound -< ()
-        Just found -> do app -< (found, ())
+data WebAppM router m s t where
+    WebAppEmbedM :: m s t -> WebAppM router m s t
+    WebAppJumpM
+        :: ( IsRoute route
+           , HasRoute m router router route
+           )
+        => Route route
+        -> WebAppM router m (RouteInput route) Void
 
-getPathParts :: forall o . Flow o Window [T.Text]
-getPathParts = impureFlow $ \window -> do
+data WebAppN router n t where
+    WebAppEmbedN :: n t -> WebAppN router n t
+    WebAppJumpN
+        :: ( IsRoute route )
+        => Route route
+        -> RouteInput route
+        -> WebAppN router n (FlowContinuation (WebAppN router n) t)
+        -> WebAppN router n t
+
+instance Functor n => Functor (WebAppN router n) where
+    fmap f term = case term of
+        WebAppEmbedN n -> WebAppEmbedN (fmap f n)
+        WebAppJumpN r i n -> WebAppJumpN r i ((fmap . fmap) f n)
+
+-- |
+-- = WebApp introduction
+
+wa :: m s t -> WebAppM router m s t
+wa = WebAppEmbedM
+
+jumpTo
+    :: ( IsRoute route, HasRoute m router router route )
+    => Route route
+    -> WebAppM router m (RouteInput route) Void
+jumpTo = WebAppJumpM
+
+-- |
+-- = WebApp elimination
+
+-- | Discharge a WebAppM constructor through a KleisliFlow.
+--   The routes are resolved according to some router, and the metadata (whether
+--   it's a jump) is preserved by throwing a WebAppN on top of the underlying
+--   functor n. Since WebAppN n is a functor whenever n is a functor, the
+--   FlowContinuation over this thing is a monad and therefore the Kleisli arrow
+--   over the FlowContinuation is an arrow, and so suitable for use in, say,
+--   runFlow.
+dischargeWebAppM
+    :: forall m n router .
+       ( Functor n )
+    => Router m router
+    -> KleisliFlowTransformation m n
+    -> KleisliFlowTransformation (WebAppM router m) (WebAppN router n)
+dischargeWebAppM router trans = \term s -> case term of
+    WebAppEmbedM sub -> WebAppEmbedN (trans sub s)
+    WebAppJumpM (route :: Route route) ->
+        let resolved :: Flow (WebAppM router m) (RouteInput route) Void
+            resolved = getRoute router route
+            next :: Flow (KleisliFlow (WebAppN router n)) (RouteInput route) Void
+            next = flowTrans (kleisliFlow (dischargeWebAppM router trans)) resolved
+            fk :: FlowContinuation (WebAppN router n) Void
+            fk = runKleisli (runFlow next) s
+            n :: WebAppN router n (FlowContinuation (WebAppN router n) Void)
+            n = elimFlowContinuation absurd id fk
+        in  WebAppJumpN route s n
+
+-- |
+-- = Some utilities for wiring up a web app to the browser navigation
+--   mechanisms.
+
+type Origin = T.Text
+
+-- | Extract the path parts from the Window's location: the URL path part
+--   separated on '/'.
+getPathParts :: Window -> IO [T.Text]
+getPathParts window = do
     Just location <- getLocation window
     pathname <- textFromJSString <$> getPathname location
     -- pathname does not include the part after ? so it's all good.
@@ -364,158 +324,168 @@ getPathParts = impureFlow $ \window -> do
     let parts = filter isNonEmpty splitParts
     pure parts
 
-setHistory :: forall o . Flow o (Window, T.Text) ()
-setHistory = impureFlow $ \(window, urlpath) -> do
+-- | Set the Window history to a given path.
+--
+--   TODO in order to determine forward/backward we shall put data into the
+--   state.
+setHistory :: Window -> T.Text -> JSVal -> IO ()
+setHistory window urlpath val = do
     --liftIO (putStrLn (show (mconcat ["Setting history to ", urlpath])))
     Just history <- getHistory window
-    pushState history nullRef ("" :: T.Text) urlpath
+    pushState history val ("" :: T.Text) urlpath
     pure ()
 
--- | Make the full URL of a given route. The window's origin is used.
-getUrl
-    :: (IsRoute route, HasRoute router env state router route)
-    => WebAppFlowExplicit router env state o (Proxy route, RouteInput route) T.Text
-getUrl = proc (proxy, inp) -> do
-    origin <- getOrigin -< ()
-    path <- arr (uncurry routePath) -< (proxy, inp)
-    returnA -< mconcat [origin, path]
-
+-- | Get the path part of a given route. See makeRouteUrl for the full URL.
 routePath
     :: ( IsRoute route )
-    => Proxy route
+    => Route route
     -> RouteInput route
     -> T.Text
 routePath route = T.cons '/' . mconcat . intersperse (T.pack "/") . routePathParts route
 
--- | Go to the flow in a route under a particular name, prefixed by an
---   effectful flow which pushes the window's history to the route path under
---   the given name.
-jumpTo
-    :: forall router route env state o .
-       ( IsRoute route
-       , HasRoute router env state router route
-       )
-    => Proxy router
-    -> Proxy route
-    -> WebAppFlowExplicit router env state o (RouteInput route) Void
-jumpTo _ name = proc inp -> do
-    window <- getWindow -< ()
-    router <- getRouter -< ()
-    () <- webAppFlow_ setHistory -< (window, path inp)
-    let nextFlow = getRoute router name
-    app -< (nextFlow, inp)
-  where
-    path = routePath (Proxy :: Proxy route)
+-- | Make the full URL of a given route.
+routeUrl
+    :: (IsRoute route)
+    => Origin
+    -> Route route
+    -> RouteInput route
+    -> T.Text
+routeUrl origin route routeInput =
+    let path = routePath route routeInput
+    in  mconcat [origin, path]
 
--- | Run a WebApp. Do not use this more than once. It does mutations through 
---   the W3C history API and binds events on it too.
-webApp'
-    :: forall router env state o .
-       ( MatchRoute router env state router )
+-- | Run a WebApp in a standard way: update the browser history on jumps, and
+--   respond to the browser's forward/back buttons.
+standardWebApp
+    :: forall router a fixed transition .
+       ( a ~ WidgetM fixed transition
+       , MatchRoute a router router
+       )
     => Window
-    -> Router router env state
-    -> WebAppFlowExplicit router env state o () Void -- route doesn't match, use this.
-    -> OpenWidget (env, ReactiveState state) (Sequence (Maybe o))
-webApp' window router notFound = widget $ \(~((env, reactiveState), viewChildren)) -> do
-    --liftMomentIO (liftIO (putStrLn "webApp : setting up"))
-    (rest, fire) <- liftMomentIO newEvent
-    let fullEnv = (window, router, env)
-    let onPopState :: IO ()
+    -> Router a router
+    -> (forall fixed t . UI (Event (Union fixed (Transition (Either WebAppTransition transition) (FlowContinuation (WidgetN fixed (Either WebAppTransition transition)) t)))) -> UI (Event (Union fixed (Transition (Either WebAppTransition transition) t))))
+    -> Flow (WebAppM router a) () Void -- ^ Not found.
+    -> KleisliFlowTransformation (WidgetM fixed transition) (WidgetN fixed transition)
+    -> MomentIO (Event fixed)
+standardWebApp window router makeUI notFound kftrans = do
+
+    let makeFlowContinuation
+            :: Flow (WebAppM router (WidgetM fixed transition)) () Void
+            -> FlowContinuation (WebAppN router (WidgetN fixed transition)) Void
+        makeFlowContinuation = \flow ->
+            let transed = flowTrans (kleisliFlow (dischargeWebAppM router kftrans)) flow
+            in  runKleisli (runFlow transed) ()
+
+    -- Obtain forwards and backwards events.
+    -- We use an IORef with an Int to tag the history states, so that we can
+    -- determine whether a pop state is forwards or backwards.
+    navCounter <- liftIO $ newIORef (0 :: Int)
+    (evForwards, fireForwardsEvent) <- newEvent
+    (evBackwards, fireBackwardsEvent) <- newEvent
+    let onPopState :: EventM Window PopStateEvent ()
         onPopState = do
-            Just location <- getLocation window
-            pathname <- textFromJSString <$> getPathname location
-            putStrLn ("webApp : window.onPopState fires with path name " ++ show pathname)
-            -- We need a way to get the current state of the flow at this point
-            -- in time!
-            let flow = arr (\i -> ((i, fullEnv), reactiveState))
-                    >>> runReactiveStateArrow (runReader (runWebAppFlowExplicit (start Proxy notFound)))
-            fire flow
-    -- Oddly enough, popstate is also fired when history is pushed.
-    -- The web is weird.
-    unbind <- liftMomentIO . liftIO $ on window popState (liftIO onPopState)
-    let first = arr (\i -> ((i, fullEnv), reactiveState))
-            >>> runReactiveStateArrow (runReader (runWebAppFlowExplicit (start Proxy notFound)))
-    let seqnc :: Sequence (Flow o () Void)
-        seqnc = first |> rest
-    --liftMomentIO (sequenceReactimate (const (putStrLn "webApp : flow changing") <$> seqnc))
-    let styleModifier = modifier $ \_ -> style' (always [Set fullWidthHeight])
-    let makeUI :: Flow o () Void -> UI (Sequence (Maybe o))
-        makeUI flow = ui (div (runFlow flow) `modify_` styleModifier)
-        -- NB the following will not typecheck.
-        --   makeUI = ui . div . runFlow
-        -- Why?
-        --   runFlow :: Flow o s Void -> (forall tag . Widget tag s (Sequence o))
-        --   div :: (forall tag . Widget tag s t) -> Widget "div" s t
-        --   ui :: forall tag t . W3CTag  tag => Widget tag () t -> UI t
-        -- Could it be a bug? Surely if
-        --   f (g x)
-        -- is well typed then so too is
-        --   f . g
-    let childrenSequence :: forall inp out . Sequence (Single (Sequence (Maybe o)) inp out SetChild)
-        childrenSequence = Single . newChild . makeUI <$> seqnc
-    let ~(firstChild, restChild) = runSequence childrenSequence
-    let viewChildrenSequence = viewChildrenInitial viewChildren |> viewChildrenEvent viewChildren
-    outSeqnc :: Sequence (Maybe o)
-        <- buildSequence (sequenceSwitch (childData . runSingle <$> viewChildrenSequence))
-    pure (outSeqnc, children firstChild (pure <$> restChild))
+            pathParts <- liftIO $ getPathParts window
+            let resolvedFlow = matchRoute router pathParts
+            let flow = maybe notFound id resolvedFlow
+            let fk = makeFlowContinuation flow
+            popStateEvent <- EventM.event
+            current <- liftIO $ readIORef navCounter
+            found :: JSVal <- PopStateEvent.getState popStateEvent
+            let found' :: Int
+                found' = maybe 0 id (pFromJSVal found)
+            if current < found'
+            then liftIO $ fireBackwardsEvent fk
+            else liftIO $ fireForwardsEvent fk
+            liftIO $ writeIORef navCounter found'
+            pure ()
+    unbind <- liftIO $ on window popState onPopState
 
--- | Given a complete web app flow with a side-channel event, embed it into
---   another web app flow on the same routes, environment, and state, by
---   using its side-channel as its control event.
---
---   It's just openFlow but with the extra web app decorations.
-embedWebAppFlow
-    :: forall routes env state s t anything .
-       WebAppFlowExplicit routes env state (Event t) s Void
-    -> WebAppFlowExplicit routes env state anything s t
-embedWebAppFlow =
-      WebAppFlowExplicit
-    . ReaderArrow
-    . ReactiveStateArrow
-    . openIt
-    . runReactiveStateArrow
-    . runReader
-    . runWebAppFlowExplicit
-  where
-    -- To use openFlow the output must be Void. Here we have (Void, state)
-    -- so that's just as well.
-    openIt flow = openFlow (flow >>> arr absurd)
+    -- Use the window's current path to find the first flow to use.
+    pathParts <- liftIO $ getPathParts window
+    let match = matchRoute router pathParts
+    let initialFlow :: Flow (WebAppM router (WidgetM fixed transition)) () Void
+        initialFlow = maybe notFound id match
+    let fkWebApp :: FlowContinuation (WebAppN router (WidgetN fixed transition)) Void
+        fkWebApp = makeFlowContinuation initialFlow
 
-class 
-    ( MatchRoute (WebAppRoutes app) (WebAppEnvironment app) (WebAppState app) (WebAppRoutes app)
-    ) => WebApp (app :: *)
-  where
-    -- | Description of routes.
-    type WebAppRoutes app :: *
-    -- | Read-only data for the WebApp.
-    type WebAppEnvironment app :: *
-    -- | Read/write data for the WebApp.
-    type WebAppState app :: *
+    let fkWidget :: FlowContinuation (WidgetN (Union fixed T.Text) (Either WebAppTransition transition)) Void
+        fkWidget = flowContinuationTrans' (dischargeWebAppN evForwards evBackwards) fkWebApp
+    let widget :: UI (Event (Union (Union fixed T.Text) (Transition (Either WebAppTransition transition) Void)))
+        widget = either absurd id (runWidgetFlow' makeUI fkWidget)
 
-type WebAppFlow app o = WebAppFlowExplicit (WebAppRoutes app) (WebAppEnvironment app) (WebAppState app) o
+    -- Render the UI
+    Just document <- liftIO $ webViewGetDomDocument window
+    Just body <- liftIO $ getBody document
+    seqnc <- reactiveDom document body (always widget)
+    ev :: Event (Union (Union fixed T.Text) (Transition (Either WebAppTransition transition) Void))
+        <- sequenceSwitchE seqnc
 
--- | Since a WebApp needs control of the browser history, it's not suitable
---   for embedding in other UIs. Thus we don't give you an OpenWidget, but
---   instead close it up as a div and render it in the body. Its height and
---   width are set to 100%.
-webApp
-    :: ( WebApp app
-       , MakeRouter (WebAppRoutes app) (WebAppEnvironment app) (WebAppState app) router
-       )
-    => Proxy app
-    -> Window
-    -> WebAppEnvironment app
-    -> WebAppState app
-    -> WebAppFlow app o () Void
-    -> router
-    -> MomentIO ()
-webApp app window env state notFound router = do
-    reactiveState <- newReactiveState state
-    let widget = div (webApp' window router' notFound) `modify_` styleModifier
-    Just document <- liftIO (webViewGetDomDocument window)
-    Just body <- getBody document
-    _ <- reactiveDom document body (always (closeWidget Tag (lmap (const (env, reactiveState)) widget)))
-    pure ()
-  where
-    router' = makeRouter Proxy Proxy Proxy router
-    styleModifier = modifier $ \_ -> style' (always [Set fullWidthHeight])
+    -- Use the text event to update the browser history.
+    let historyEvent :: Event T.Text
+        historyEvent = filterJust (fmap (pickULeft >=> pickURight) ev)
+    let updateHistory :: T.Text -> IO ()
+        updateHistory txt = do
+            -- With every history update we associate an integer, so that we
+            -- can tell on pop state whether we're going backwards or forwards.
+            current <- readIORef navCounter
+            let next = current + 1
+            writeIORef navCounter next
+            setHistory window txt (pToJSVal next)
+    reactimate (updateHistory <$> historyEvent)
+
+    -- Derive and return the output event.
+    let out :: Event fixed
+        out = filterJust (fmap (pickULeft >=> pickULeft) ev)
+
+    pure out
+
+-- | Discharge the WebAppN from atop a WidgetN by throwing on forward/backward
+--   events and bringing out an event which fires on jumps.
+dischargeWebAppN
+    :: forall router n fixed transition t .
+       ( )
+    => (Event (FlowContinuation (WebAppN router (WidgetN fixed transition)) Void))
+    -> (Event (FlowContinuation (WebAppN router (WidgetN fixed transition)) Void))
+    -> WebAppN router (WidgetN fixed transition) (FlowContinuation (WebAppN router (WidgetN fixed transition)) t)
+    -> WidgetN (Union fixed T.Text) (Either WebAppTransition transition) (FlowContinuation (WebAppN router (WidgetN fixed transition)) t)
+dischargeWebAppN evForwards evBackwards term = case term of
+
+    -- Route and route input are unused here. They are used in the embed case,
+    -- whenever the next term is a jump.
+    WebAppJumpN _ _ webAppN -> dischargeWebAppN evForwards evBackwards (join <$> webAppN)
+
+    WebAppEmbedN (WidgetN ui) ->
+        -- 
+        let alterEvent :: forall t . Union fixed (Transition transition (FlowContinuation (WebAppN router (WidgetN fixed transition)) t))
+                    -> Union (Union fixed T.Text) (Transition (Either WebAppTransition transition) (FlowContinuation (WebAppN router (WidgetN fixed transition)) t))
+            alterEvent union =
+                let withJumpEvent = uGrowLeft takeJumpEvent union
+                    withTransition = fmap (transTransition takeTransition) withJumpEvent
+                in  withTransition
+
+            takeJumpEvent :: forall t . Transition transition (FlowContinuation (WebAppN router (WidgetN fixed transition)) t)
+              -> Maybe T.Text
+            takeJumpEvent (Transition (_, next)) = case next of
+                FlowNext (WebAppJumpN route routeInput _) -> Just (routePath route routeInput)
+                _ -> Nothing
+
+            takeTransition :: transition -> Either WebAppTransition transition
+            takeTransition = Right
+
+            navForwards :: forall t . Event (Transition (Either WebAppTransition transition) (FlowContinuation (WebAppN router (WidgetN fixed transition)) t))
+            navForwards = fmap (Transition . (,) (Left WebAppTransitionForwards) . fmap absurd) evForwards
+
+            navBackwards :: forall t . Event (Transition (Either WebAppTransition transition) (FlowContinuation (WebAppN router (WidgetN fixed transition)) t))
+            navBackwards = fmap (Transition . (,) (Left WebAppTransitionBackwards) . fmap absurd) evBackwards
+
+            navTransitions :: forall s t . Event (Union s (Transition (Either WebAppTransition transition) (FlowContinuation (WebAppN router (WidgetN fixed transition)) t)))
+            navTransitions = fmap URight (unionWith const navForwards navBackwards)
+
+            ui' :: UI (Event (Union (Union fixed T.Text) (Transition (Either WebAppTransition transition) (FlowContinuation (WebAppN router (WidgetN fixed transition)) t))))
+            ui' = fmap (unionWith const navTransitions) ((fmap . fmap) alterEvent ui)
+
+        in  WidgetN ui'
+
+data WebAppTransition where
+    WebAppTransitionForwards :: WebAppTransition
+    WebAppTransitionBackwards :: WebAppTransition
